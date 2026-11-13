@@ -1,0 +1,1244 @@
+-- =====================================================================
+-- Plataforma Doadores <-> Instituições (Angola, âmbito nacional)
+-- SQL COMPLETO (v3, em português)
+--
+-- Executar num projeto Supabase novo (ou apagar antes as tabelas antigas
+-- em inglês). Se "create extension pg_cron" falhar, ative-a primeiro em
+-- Database > Extensions.
+--
+-- Regras principais:
+--  * Doadores cadastram-se a si mesmos (trigger em auth.users).
+--  * Qualquer pessoa (mesmo sem login) vê, na vista "doadores_publicos",
+--    APENAS tipo sanguíneo + telefone (e só de quem deixou perfil_publico).
+--  * Instituições verificadas recebem dados dos doadores próximos através
+--    de funções (doadores_proximos...). Dados de saúde só aparecem se o
+--    doador consentiu (partilhar_dados_saude).
+--  * Doador vê sempre os seus próprios dados de saúde, aptidão e tempo
+--    desde a última doação (minha_aptidao()).
+--  * Candidatura a doador de órgãos: só clínicas verificadas a recebem.
+-- =====================================================================
+
+create extension if not exists postgis with schema extensions;
+create extension if not exists pg_cron;
+
+-- ---------------------------------------------------------------------
+-- 1. ENUMS
+-- ---------------------------------------------------------------------
+create type public.papel_utilizador    as enum ('doador', 'instituicao', 'admin');
+create type public.estado_instituicao  as enum ('pendente', 'verificada', 'rejeitada', 'suspensa');
+create type public.tipo_instituicao    as enum ('hospital', 'clinica', 'banco_de_sangue', 'ong', 'outra');
+-- A ORDEM importa: informativo < atencao < urgente < critico
+create type public.nivel_alerta        as enum ('informativo', 'atencao', 'urgente', 'critico');
+create type public.estado_alerta       as enum ('rascunho', 'ativo', 'cumprido', 'cancelado', 'expirado');
+create type public.canal_notificacao   as enum ('in_app', 'push', 'sms', 'email');
+create type public.estado_envio        as enum ('pendente', 'enviado', 'falhou');
+create type public.tipo_resposta       as enum ('aceite', 'recusada');
+create type public.tipo_sanguineo      as enum ('A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-');
+create type public.sexo                as enum ('masculino', 'feminino');
+create type public.tipo_doacao_orgaos  as enum ('em_vida', 'apos_morte', 'ambos');
+create type public.estado_candidatura  as enum ('ativa', 'retirada', 'suspensa');
+
+-- ---------------------------------------------------------------------
+-- 2. TABELAS DE REFERÊNCIA
+-- ---------------------------------------------------------------------
+create table public.provincias (
+  id    serial primary key,
+  nome  text not null unique
+);
+
+insert into public.provincias (nome) values
+  ('Bengo'), ('Benguela'), ('Bié'), ('Cabinda'), ('Cuando'), ('Cubango'),
+  ('Cuanza Norte'), ('Cuanza Sul'), ('Cunene'), ('Huambo'), ('Huíla'),
+  ('Icolo e Bengo'), ('Luanda'), ('Lunda Norte'), ('Lunda Sul'), ('Malanje'),
+  ('Moxico'), ('Moxico Leste'), ('Namibe'), ('Uíge'), ('Zaire');
+
+create table public.municipios (
+  id            serial primary key,
+  provincia_id  int not null references public.provincias(id) on delete cascade,
+  nome          text not null,
+  unique (provincia_id, nome)
+);
+
+create index municipios_provincia_idx on public.municipios (provincia_id);
+
+-- Municípios de Benguela como ponto de partida. Importe os restantes
+-- (lista oficial do INE) para as outras províncias; enquanto isso, doadores
+-- e instituições funcionam só com a província (municipio_id é opcional).
+insert into public.municipios (provincia_id, nome)
+select p.id, m.nome
+from public.provincias p,
+     (values ('Benguela'), ('Baía Farta'), ('Balombo'), ('Bocoio'), ('Caimbambo'),
+             ('Catumbela'), ('Chongorói'), ('Cubal'), ('Ganda'), ('Lobito')) as m(nome)
+where p.nome = 'Benguela';
+
+create table public.categorias (
+  id         serial primary key,
+  slug       text unique not null,
+  nome       text not null,
+  descricao  text
+);
+
+insert into public.categorias (slug, nome) values
+  ('sangue',       'Sangue'),
+  ('alimentos',    'Alimentos'),
+  ('roupa',        'Roupa e calçado'),
+  ('medicamentos', 'Medicamentos'),
+  ('higiene',      'Higiene e limpeza'),
+  ('dinheiro',     'Donativos financeiros'),
+  ('voluntariado', 'Voluntariado');
+
+create table public.orgaos (
+  id          serial primary key,
+  slug        text unique not null,
+  nome        text not null,
+  em_vida     boolean not null default false,   -- pode ser doado em vida
+  apos_morte  boolean not null default true     -- pode ser doado após a morte
+);
+
+insert into public.orgaos (slug, nome, em_vida, apos_morte) values
+  ('rim',          'Rim',            true,  true),
+  ('figado',       'Fígado (parte)', true,  true),
+  ('medula_ossea', 'Medula óssea',   true,  false),
+  ('coracao',      'Coração',        false, true),
+  ('pulmoes',      'Pulmões',        false, true),
+  ('pancreas',     'Pâncreas',       false, true),
+  ('corneas',      'Córneas',        false, true),
+  ('pele',         'Pele',           false, true);
+
+-- Quem pode dar sangue a quem (glóbulos vermelhos)
+create table public.compatibilidade_sanguinea (
+  tipo_doador  public.tipo_sanguineo not null,
+  tipo_recetor public.tipo_sanguineo not null,
+  primary key (tipo_doador, tipo_recetor)
+);
+
+insert into public.compatibilidade_sanguinea (tipo_doador, tipo_recetor) values
+  ('O-','O-'),('O-','O+'),('O-','A-'),('O-','A+'),('O-','B-'),('O-','B+'),('O-','AB-'),('O-','AB+'),
+  ('O+','O+'),('O+','A+'),('O+','B+'),('O+','AB+'),
+  ('A-','A-'),('A-','A+'),('A-','AB-'),('A-','AB+'),
+  ('A+','A+'),('A+','AB+'),
+  ('B-','B-'),('B-','B+'),('B-','AB-'),('B-','AB+'),
+  ('B+','B+'),('B+','AB+'),
+  ('AB-','AB-'),('AB-','AB+'),
+  ('AB+','AB+');
+
+-- ---------------------------------------------------------------------
+-- 3. UTILIZADORES, DOADORES E INSTITUIÇÕES
+-- ---------------------------------------------------------------------
+create table public.perfis (
+  id             uuid primary key references auth.users(id) on delete cascade,
+  papel          public.papel_utilizador not null default 'doador',
+  nome_completo  text,
+  telefone       text check (telefone is null or telefone ~ '^\+[1-9][0-9]{7,14}$'),
+  url_avatar     text,
+  criado_em      timestamptz not null default now()
+);
+
+create unique index perfis_telefone_uidx on public.perfis (telefone) where telefone is not null;
+
+create table public.doadores (
+  utilizador_id         uuid primary key references public.perfis(id) on delete cascade,
+  tipo_sanguineo        public.tipo_sanguineo,
+  sexo                  public.sexo,
+  data_nascimento       date,
+  -- localização
+  lat                   double precision check (lat between -90 and 90),
+  lng                   double precision check (lng between -180 and 180),
+  localizacao           geography(Point, 4326) generated always as (
+                          case
+                            when lat is not null and lng is not null
+                            then ST_SetSRID(ST_MakePoint(lng, lat), 4326)::geography
+                            else null
+                          end
+                        ) stored,
+  bairro                text,
+  provincia_id          int references public.provincias(id),
+  municipio_id          int references public.municipios(id),
+  -- preferências de alertas
+  distancia_maxima_km   numeric not null default 10 check (distancia_maxima_km between 1 and 100),
+  nivel_minimo_alerta   public.nivel_alerta not null default 'atencao',
+  disponivel            boolean not null default true,
+  horario_preferencial  text check (horario_preferencial is null or horario_preferencial in ('manha','tarde','qualquer')),
+  raio_deslocacao       text check (raio_deslocacao is null or raio_deslocacao in ('5km','municipio','provincia','pais')),
+  -- privacidade
+  perfil_publico        boolean not null default true,   -- aparece em doadores_publicos (tipo sanguíneo + telefone)
+  partilhar_dados_saude boolean not null default false,  -- instituições veem os fatores de saúde
+  -- última doação
+  ultima_doacao_em      timestamptz,
+  -- fatores de saúde
+  peso_kg               numeric check (peso_kg is null or peso_kg between 40 and 200),
+  altura_cm             numeric check (altura_cm is null or altura_cm between 140 and 220),
+  doencas_cronicas      text check (doencas_cronicas is null or doencas_cronicas in ('nenhuma','hipertensao','diabetes','anemia_falciforme','outra')),
+  medicacao             text check (medicacao is null or medicacao in ('nao','anticoagulantes','antibioticos','outro')),
+  tatuagem_recente      boolean not null default false,
+  viagem_recente        boolean not null default false,
+  fumador               boolean not null default false,
+  consome_alcool        boolean not null default false,
+  atualizado_em         timestamptz not null default now()
+);
+
+create index doadores_localizacao_gix on public.doadores using gist (localizacao);
+create index doadores_tipo_sanguineo_idx on public.doadores (tipo_sanguineo);
+create index doadores_provincia_idx on public.doadores (provincia_id);
+create index doadores_municipio_idx on public.doadores (municipio_id);
+
+create table public.doadores_categorias (
+  doador_id     uuid references public.doadores(utilizador_id) on delete cascade,
+  categoria_id  int  references public.categorias(id) on delete cascade,
+  primary key (doador_id, categoria_id)
+);
+
+create table public.instituicoes (
+  id            uuid primary key default gen_random_uuid(),
+  dono_id       uuid not null references public.perfis(id) on delete cascade,
+  nome          text not null,
+  tipo          public.tipo_instituicao not null default 'outra',
+  descricao     text,
+  nif           text,
+  telefone      text,
+  endereco      text,
+  provincia_id  int references public.provincias(id),
+  municipio_id  int references public.municipios(id),
+  lat           double precision check (lat between -90 and 90),
+  lng           double precision check (lng between -180 and 180),
+  localizacao   geography(Point, 4326) generated always as (
+                  case
+                    when lat is not null and lng is not null
+                    then ST_SetSRID(ST_MakePoint(lng, lat), 4326)::geography
+                    else null
+                  end
+                ) stored,
+  estado        public.estado_instituicao not null default 'pendente',
+  verificada_em timestamptz,
+  criado_em     timestamptz not null default now()
+);
+
+create index instituicoes_localizacao_gix on public.instituicoes using gist (localizacao);
+create index instituicoes_dono_idx on public.instituicoes (dono_id);
+create index instituicoes_tipo_estado_idx on public.instituicoes (tipo, estado);
+create index instituicoes_provincia_idx on public.instituicoes (provincia_id);
+
+-- ---------------------------------------------------------------------
+-- 4. ALERTAS, NOTIFICAÇÕES, RESPOSTAS E DOAÇÕES
+-- ---------------------------------------------------------------------
+create table public.configuracao_niveis_alerta (
+  nivel                    public.nivel_alerta primary key,
+  raio_padrao_km           numeric not null,
+  raio_maximo_km           numeric not null,
+  canais                   public.canal_notificacao[] not null,
+  escalar_apos_minutos     int,
+  expira_apos_horas        int not null
+);
+
+insert into public.configuracao_niveis_alerta values
+  ('informativo', 5,  10, '{in_app}',          null, 72),
+  ('atencao',     10, 20, '{in_app,email}',    60,   48),
+  ('urgente',     15, 60, '{in_app,push}',     30,   24),
+  ('critico',     25, 150, '{in_app,push,sms}', 10,   12);
+
+create table public.alertas (
+  id                        uuid primary key default gen_random_uuid(),
+  instituicao_id            uuid not null references public.instituicoes(id) on delete cascade,
+  categoria_id              int references public.categorias(id),
+  tipo_sanguineo_necessario public.tipo_sanguineo,           -- só para alertas de sangue
+  nivel                     public.nivel_alerta not null default 'informativo',
+  estado                    public.estado_alerta not null default 'ativo',
+  titulo                    text not null,
+  corpo                     text,
+  codigo_curto              text,                            -- usado para responder por SMS
+  lat                       double precision,
+  lng                       double precision,
+  localizacao               geography(Point, 4326) generated always as (
+                              case
+                                when lat is not null and lng is not null
+                                then ST_SetSRID(ST_MakePoint(lng, lat), 4326)::geography
+                                else null
+                              end
+                            ) stored,
+  doadores_necessarios      int not null default 1 check (doadores_necessarios > 0),
+  raio_atual_km             numeric,
+  numero_escaladas          int not null default 0,
+  ultima_escalada_em        timestamptz,
+  expira_em                 timestamptz,
+  criado_em                 timestamptz not null default now()
+);
+
+create index alertas_localizacao_gix on public.alertas using gist (localizacao);
+create index alertas_estado_nivel_idx on public.alertas (estado, nivel);
+create index alertas_instituicao_idx on public.alertas (instituicao_id);
+create unique index alertas_codigo_curto_ativo_uidx on public.alertas (codigo_curto) where estado = 'ativo';
+
+create table public.notificacoes (
+  id            uuid primary key default gen_random_uuid(),
+  alerta_id     uuid not null references public.alertas(id) on delete cascade,
+  doador_id     uuid not null references public.perfis(id) on delete cascade,
+  canal         public.canal_notificacao not null,
+  estado        public.estado_envio not null default 'pendente',
+  distancia_m   int,
+  id_fornecedor text,
+  erro          text,
+  criado_em     timestamptz not null default now(),
+  enviado_em    timestamptz,
+  lida_em       timestamptz,
+  unique (alerta_id, doador_id, canal)
+);
+
+create index notificacoes_doador_idx on public.notificacoes (doador_id, criado_em desc);
+create index notificacoes_alerta_idx on public.notificacoes (alerta_id);
+create index notificacoes_pendentes_idx on public.notificacoes (estado) where estado = 'pendente';
+
+create table public.respostas_alertas (
+  id         uuid primary key default gen_random_uuid(),
+  alerta_id  uuid not null references public.alertas(id) on delete cascade,
+  doador_id  uuid not null references public.perfis(id) on delete cascade,
+  resposta   public.tipo_resposta not null,
+  mensagem   text,
+  criado_em  timestamptz not null default now(),
+  unique (alerta_id, doador_id)
+);
+
+create index respostas_alertas_alerta_idx on public.respostas_alertas (alerta_id);
+
+-- Histórico de doações efetivamente realizadas (registado pela instituição)
+create table public.doacoes (
+  id             uuid primary key default gen_random_uuid(),
+  doador_id      uuid not null references public.doadores(utilizador_id) on delete cascade,
+  instituicao_id uuid not null references public.instituicoes(id) on delete restrict,
+  alerta_id      uuid references public.alertas(id) on delete set null,
+  categoria_id   int references public.categorias(id),
+  data_doacao    timestamptz not null default now(),
+  volume_ml      int check (volume_ml is null or volume_ml between 100 and 600),
+  observacoes    text,
+  registada_por  uuid references public.perfis(id) on delete set null,
+  criado_em      timestamptz not null default now()
+);
+
+create index doacoes_doador_idx on public.doacoes (doador_id, data_doacao desc);
+create index doacoes_instituicao_idx on public.doacoes (instituicao_id, data_doacao desc);
+
+-- ---------------------------------------------------------------------
+-- 5. DOAÇÃO DE ÓRGÃOS (recebida apenas por clínicas)
+-- ---------------------------------------------------------------------
+create table public.candidaturas_orgaos (
+  id               uuid primary key default gen_random_uuid(),
+  doador_id        uuid not null unique references public.doadores(utilizador_id) on delete cascade,
+  tipo_doacao      public.tipo_doacao_orgaos not null default 'apos_morte',
+  consentimento    boolean not null check (consentimento),   -- consentimento expresso obrigatório
+  consentimento_em timestamptz not null default now(),
+  estado           public.estado_candidatura not null default 'ativa',
+  observacoes      text,
+  criado_em        timestamptz not null default now(),
+  atualizado_em    timestamptz not null default now()
+);
+
+create table public.candidaturas_orgaos_itens (
+  candidatura_id uuid not null references public.candidaturas_orgaos(id) on delete cascade,
+  orgao_id       int  not null references public.orgaos(id) on delete restrict,
+  primary key (candidatura_id, orgao_id)
+);
+
+-- ---------------------------------------------------------------------
+-- 6. FUNÇÕES AUXILIARES
+-- ---------------------------------------------------------------------
+create or replace function public.eh_admin()
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from perfis where id = auth.uid() and papel = 'admin');
+$$;
+
+create or replace function public.meu_papel()
+returns public.papel_utilizador language sql stable security definer set search_path = public as $$
+  select papel from perfis where id = auth.uid();
+$$;
+
+create or replace function public.sou_dono_instituicao(p_id uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from instituicoes where id = p_id and dono_id = auth.uid());
+$$;
+
+create or replace function public.sou_instituicao_verificada()
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from instituicoes where dono_id = auth.uid() and estado = 'verificada');
+$$;
+
+-- Triggers de validação / carimbo de data
+create or replace function public.validar_doador()
+returns trigger language plpgsql as $$
+begin
+  if new.data_nascimento is not null
+     and new.data_nascimento > (current_date - interval '18 years')::date then
+    raise exception 'É necessário ter pelo menos 18 anos para ser doador';
+  end if;
+  if new.ultima_doacao_em is not null and new.ultima_doacao_em > now() then
+    raise exception 'A data da última doação não pode estar no futuro';
+  end if;
+  new.atualizado_em := now();
+  return new;
+end $$;
+
+create trigger doadores_validar_trg
+  before insert or update on public.doadores
+  for each row execute function public.validar_doador();
+
+create or replace function public.carimbar_atualizado_em()
+returns trigger language plpgsql as $$
+begin
+  new.atualizado_em := now();
+  return new;
+end $$;
+
+create trigger candidaturas_orgaos_carimbo_trg
+  before update on public.candidaturas_orgaos
+  for each row execute function public.carimbar_atualizado_em();
+
+-- Cada órgão escolhido tem de ser compatível com o tipo de doação
+create or replace function public.validar_item_orgao()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_tipo public.tipo_doacao_orgaos; v_org orgaos;
+begin
+  select tipo_doacao into v_tipo from candidaturas_orgaos where id = new.candidatura_id;
+  select * into v_org from orgaos where id = new.orgao_id;
+  if v_tipo = 'em_vida' and not v_org.em_vida then
+    raise exception 'O órgão "%" não pode ser doado em vida', v_org.nome;
+  end if;
+  if v_tipo = 'apos_morte' and not v_org.apos_morte then
+    raise exception 'O órgão "%" não pode ser doado após a morte', v_org.nome;
+  end if;
+  return new;
+end $$;
+
+create trigger candidaturas_orgaos_itens_validar_trg
+  before insert on public.candidaturas_orgaos_itens
+  for each row execute function public.validar_item_orgao();
+
+-- ---------------------------------------------------------------------
+-- 7. CRIAÇÃO AUTOMÁTICA DE UTILIZADOR (auto-cadastro do doador)
+-- Metadados aceites no signUp: papel, nome_completo, telefone,
+-- tipo_sanguineo, sexo, data_nascimento, provincia, municipio
+-- (também aceita role / full_name / phone por compatibilidade)
+-- ---------------------------------------------------------------------
+create or replace function public.tratar_novo_utilizador()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare
+  v_meta         jsonb := coalesce(new.raw_user_meta_data, '{}'::jsonb);
+  v_papel        public.papel_utilizador;
+  v_telefone     text;
+  v_tipo         public.tipo_sanguineo;
+  v_sexo         public.sexo;
+  v_nascimento   date;
+  v_municipio_id int;
+  v_provincia_id int;
+  v_mun_prov     int;
+begin
+  -- só 'instituicao' ou 'doador' podem ser pedidos; 'admin' nunca
+  v_papel := case when coalesce(v_meta->>'papel', v_meta->>'role') = 'instituicao'
+                  then 'instituicao'::public.papel_utilizador
+                  else 'doador'::public.papel_utilizador end;
+
+  v_telefone := coalesce(
+    v_meta->>'telefone',
+    v_meta->>'phone',
+    case when coalesce(new.phone, '') <> '' then '+' || ltrim(new.phone, '+') end
+  );
+  if v_telefone is not null and v_telefone !~ '^\+[1-9][0-9]{7,14}$' then
+    v_telefone := null;
+  end if;
+
+  insert into perfis (id, papel, nome_completo, telefone)
+  values (new.id, v_papel, coalesce(v_meta->>'nome_completo', v_meta->>'full_name'), v_telefone);
+
+  if v_papel = 'doador' then
+    v_tipo := case when v_meta->>'tipo_sanguineo' = any (enum_range(null::public.tipo_sanguineo)::text[])
+                   then (v_meta->>'tipo_sanguineo')::public.tipo_sanguineo end;
+    v_sexo := case when v_meta->>'sexo' = any (enum_range(null::public.sexo)::text[])
+                   then (v_meta->>'sexo')::public.sexo end;
+    begin
+      v_nascimento := (v_meta->>'data_nascimento')::date;
+    exception when others then
+      v_nascimento := null;
+    end;
+
+    select id into v_provincia_id from provincias
+      where lower(nome) = lower(coalesce(v_meta->>'provincia', '')) limit 1;
+
+    select m.id, m.provincia_id into v_municipio_id, v_mun_prov from municipios m
+      where lower(m.nome) = lower(coalesce(v_meta->>'municipio', ''))
+        and (v_provincia_id is null or m.provincia_id = v_provincia_id)
+      limit 1;
+
+    v_provincia_id := coalesce(v_provincia_id, v_mun_prov);
+
+    insert into doadores (utilizador_id, tipo_sanguineo, sexo, data_nascimento, provincia_id, municipio_id)
+    values (new.id, v_tipo, v_sexo, v_nascimento, v_provincia_id, v_municipio_id);
+
+    -- todo o doador recebe, por omissão, alertas de sangue
+    insert into doadores_categorias (doador_id, categoria_id)
+    select new.id, id from categorias where slug = 'sangue';
+  end if;
+
+  return new;
+end $$;
+
+create trigger ao_criar_utilizador_trg
+  after insert on auth.users
+  for each row execute function public.tratar_novo_utilizador();
+
+-- ---------------------------------------------------------------------
+-- 8. APTIDÃO PARA DOAR SANGUE
+-- ---------------------------------------------------------------------
+-- Função interna (não exposta à API). Intervalo mínimo: 90 dias (homens)
+-- e 120 dias (mulheres).
+create or replace function public.calcular_aptidao(p_doador_id uuid)
+returns table (apto boolean, proxima_doacao_em date, motivos text[])
+language plpgsql stable security definer set search_path = public as $$
+declare
+  v_d         doadores;
+  v_intervalo int;
+begin
+  select * into v_d from doadores where utilizador_id = p_doador_id;
+  motivos := '{}';
+  proxima_doacao_em := null;
+
+  if not found then
+    apto := false;
+    motivos := array['Perfil de doador não encontrado'];
+    return next;
+    return;
+  end if;
+
+  v_intervalo := case when v_d.sexo = 'feminino' then 120 else 90 end;
+
+  if v_d.tipo_sanguineo is null then
+    motivos := array_append(motivos, 'Tipo sanguíneo não informado');
+  end if;
+  if v_d.ultima_doacao_em is not null
+     and v_d.ultima_doacao_em::date + v_intervalo > current_date then
+    proxima_doacao_em := v_d.ultima_doacao_em::date + v_intervalo;
+    motivos := array_append(motivos, format('Última doação há menos de %s dias', v_intervalo));
+  end if;
+  if v_d.peso_kg is not null and v_d.peso_kg < 50 then
+    motivos := array_append(motivos, 'Peso inferior a 50 kg');
+  end if;
+  if v_d.doencas_cronicas is not null and v_d.doencas_cronicas <> 'nenhuma' then
+    motivos := array_append(motivos, 'Doença crónica declarada (requer avaliação clínica)');
+  end if;
+  if v_d.medicacao is not null and v_d.medicacao <> 'nao' then
+    motivos := array_append(motivos, 'Medicação em curso (requer avaliação clínica)');
+  end if;
+  if v_d.tatuagem_recente then
+    motivos := array_append(motivos, 'Tatuagem recente (aguardar cerca de 4 meses)');
+  end if;
+  if v_d.viagem_recente then
+    motivos := array_append(motivos, 'Viagem recente (requer avaliação clínica)');
+  end if;
+
+  apto := cardinality(motivos) = 0;
+  return next;
+end $$;
+
+-- O doador consulta a sua própria aptidão e a data da próxima doação possível
+create or replace function public.minha_aptidao()
+returns table (apto boolean, proxima_doacao_em date, motivos text[])
+language sql stable security definer set search_path = public as $$
+  select * from public.calcular_aptidao(auth.uid());
+$$;
+
+-- ---------------------------------------------------------------------
+-- 9. PESQUISA GEOGRÁFICA (para instituições)
+-- ---------------------------------------------------------------------
+create type public.doador_proximo as (
+  doador_id               uuid,
+  nome_completo           text,
+  tipo_sanguineo          public.tipo_sanguineo,
+  telefone                text,
+  bairro                  text,
+  municipio               text,
+  provincia               text,
+  distancia_km            numeric,
+  ultima_doacao_em        timestamptz,
+  dias_desde_ultima_doacao int,
+  apto                    boolean,
+  proxima_doacao_em       date,
+  motivos_inaptidao       text[],
+  -- fatores de saúde: só preenchidos se o doador consentiu
+  peso_kg                 numeric,
+  altura_cm               numeric,
+  doencas_cronicas        text,
+  medicacao               text,
+  tatuagem_recente        boolean,
+  viagem_recente          boolean,
+  fumador                 boolean,
+  consome_alcool          boolean
+);
+
+create or replace function public.doadores_proximos(
+  p_lat                    double precision,
+  p_lng                    double precision,
+  p_raio_km                numeric default 10,
+  p_categoria_id           int default null,
+  p_tipo_sanguineo_recetor public.tipo_sanguineo default null,  -- devolve só doadores compatíveis
+  p_apenas_aptos           boolean default false,
+  p_limite                 int default 50
+)
+returns setof public.doador_proximo
+language plpgsql stable security definer set search_path = public, extensions as $$
+declare
+  v_ponto geography := st_setsrid(st_makepoint(p_lng, p_lat), 4326)::geography;
+begin
+  if not (eh_admin() or sou_instituicao_verificada()) then
+    raise exception 'Sem permissão';
+  end if;
+
+  return query
+  select d.utilizador_id,
+         p.nome_completo,
+         d.tipo_sanguineo,
+         p.telefone,
+         d.bairro,
+         m.nome,
+         pr.nome,
+         round((st_distance(d.localizacao, v_ponto) / 1000.0)::numeric, 2),
+         d.ultima_doacao_em,
+         case when d.ultima_doacao_em is null then null
+              else (current_date - d.ultima_doacao_em::date) end,
+         ap.apto,
+         ap.proxima_doacao_em,
+         ap.motivos,
+         case when d.partilhar_dados_saude then d.peso_kg end,
+         case when d.partilhar_dados_saude then d.altura_cm end,
+         case when d.partilhar_dados_saude then d.doencas_cronicas end,
+         case when d.partilhar_dados_saude then d.medicacao end,
+         case when d.partilhar_dados_saude then d.tatuagem_recente end,
+         case when d.partilhar_dados_saude then d.viagem_recente end,
+         case when d.partilhar_dados_saude then d.fumador end,
+         case when d.partilhar_dados_saude then d.consome_alcool end
+  from doadores d
+  join perfis p on p.id = d.utilizador_id
+  left join municipios m on m.id = d.municipio_id
+  left join provincias pr on pr.id = d.provincia_id
+  cross join lateral public.calcular_aptidao(d.utilizador_id) ap
+  where d.disponivel
+    and d.localizacao is not null
+    and st_dwithin(d.localizacao, v_ponto, p_raio_km * 1000)
+    and (p_categoria_id is null or exists (
+          select 1 from doadores_categorias dc
+          where dc.doador_id = d.utilizador_id and dc.categoria_id = p_categoria_id))
+    and (p_tipo_sanguineo_recetor is null or exists (
+          select 1 from compatibilidade_sanguinea c
+          where c.tipo_doador = d.tipo_sanguineo and c.tipo_recetor = p_tipo_sanguineo_recetor))
+    and (not p_apenas_aptos or ap.apto)
+  order by d.localizacao <-> v_ponto
+  limit least(p_limite, 200);
+end $$;
+
+-- Atalho: usa a localização da própria instituição como centro da pesquisa
+create or replace function public.doadores_proximos_da_instituicao(
+  p_instituicao_id         uuid,
+  p_raio_km                numeric default 20,
+  p_categoria_id           int default null,
+  p_tipo_sanguineo_recetor public.tipo_sanguineo default null,
+  p_apenas_aptos           boolean default false,
+  p_limite                 int default 50
+)
+returns setof public.doador_proximo
+language plpgsql stable security definer set search_path = public, extensions as $$
+declare v_inst instituicoes;
+begin
+  select * into v_inst from instituicoes where id = p_instituicao_id;
+  if not found then raise exception 'Instituição inexistente'; end if;
+  if not (sou_dono_instituicao(p_instituicao_id) or eh_admin()) then
+    raise exception 'Sem permissão';
+  end if;
+  if v_inst.estado <> 'verificada' and not eh_admin() then
+    raise exception 'Instituição ainda não verificada';
+  end if;
+  if v_inst.lat is null or v_inst.lng is null then
+    raise exception 'A instituição não tem localização definida';
+  end if;
+
+  return query
+  select * from public.doadores_proximos(
+    v_inst.lat, v_inst.lng, p_raio_km, p_categoria_id,
+    p_tipo_sanguineo_recetor, p_apenas_aptos, p_limite);
+end $$;
+
+-- Instituições verificadas perto de um ponto (para o doador encontrar onde doar)
+create or replace function public.instituicoes_proximas(
+  p_lat double precision, p_lng double precision,
+  p_raio_km numeric default 20,
+  p_tipo public.tipo_instituicao default null
+)
+returns table (id uuid, nome text, tipo public.tipo_instituicao, endereco text, municipio text, provincia text, telefone text, distancia_km numeric)
+language sql stable security definer set search_path = public, extensions as $$
+  select i.id, i.nome, i.tipo, i.endereco, m.nome, pr.nome, i.telefone,
+         round((st_distance(i.localizacao, st_setsrid(st_makepoint(p_lng, p_lat), 4326)::geography) / 1000.0)::numeric, 2)
+  from instituicoes i
+  left join municipios m on m.id = i.municipio_id
+  left join provincias pr on pr.id = i.provincia_id
+  where i.estado = 'verificada'
+    and i.localizacao is not null
+    and (p_tipo is null or i.tipo = p_tipo)
+    and st_dwithin(i.localizacao, st_setsrid(st_makepoint(p_lng, p_lat), 4326)::geography, p_raio_km * 1000)
+  order by i.localizacao <-> st_setsrid(st_makepoint(p_lng, p_lat), 4326)::geography
+  limit 50;
+$$;
+
+-- Candidatos a doação de órgãos próximos: SÓ clínicas verificadas (ou admin)
+create or replace function public.candidatos_orgaos_proximos(
+  p_instituicao_id uuid,
+  p_raio_km        numeric default 50,
+  p_orgao_id       int default null,
+  p_limite         int default 50
+)
+returns table (
+  candidatura_id uuid, doador_id uuid, nome_completo text, telefone text,
+  tipo_sanguineo public.tipo_sanguineo, tipo_doacao public.tipo_doacao_orgaos,
+  orgaos text[], bairro text, municipio text, provincia text, distancia_km numeric, idade int
+)
+language plpgsql stable security definer set search_path = public, extensions as $$
+declare
+  v_inst  instituicoes;
+  v_ponto geography;
+begin
+  select * into v_inst from instituicoes where id = p_instituicao_id;
+  if not found then raise exception 'Instituição inexistente'; end if;
+  if not eh_admin() then
+    if not sou_dono_instituicao(p_instituicao_id)
+       or v_inst.tipo <> 'clinica'
+       or v_inst.estado <> 'verificada' then
+      raise exception 'Apenas clínicas verificadas podem consultar candidatos a doação de órgãos';
+    end if;
+  end if;
+  if v_inst.localizacao is null then
+    raise exception 'A instituição não tem localização definida';
+  end if;
+  v_ponto := v_inst.localizacao;
+
+  return query
+  select c.id, d.utilizador_id, p.nome_completo, p.telefone, d.tipo_sanguineo, c.tipo_doacao,
+         array_agg(o.nome order by o.nome),
+         d.bairro, m.nome, pr.nome,
+         round((st_distance(d.localizacao, v_ponto) / 1000.0)::numeric, 2),
+         extract(year from age(d.data_nascimento))::int
+  from candidaturas_orgaos c
+  join doadores d on d.utilizador_id = c.doador_id
+  join perfis p on p.id = d.utilizador_id
+  join candidaturas_orgaos_itens i on i.candidatura_id = c.id
+  join orgaos o on o.id = i.orgao_id
+  left join municipios m on m.id = d.municipio_id
+  left join provincias pr on pr.id = d.provincia_id
+  where c.estado = 'ativa'
+    and d.localizacao is not null
+    and st_dwithin(d.localizacao, v_ponto, p_raio_km * 1000)
+    and (p_orgao_id is null or exists (
+          select 1 from candidaturas_orgaos_itens x
+          where x.candidatura_id = c.id and x.orgao_id = p_orgao_id))
+  group by c.id, d.utilizador_id, p.nome_completo, p.telefone, d.tipo_sanguineo, c.tipo_doacao,
+           d.bairro, m.nome, pr.nome, d.localizacao, d.data_nascimento
+  order by d.localizacao <-> v_ponto
+  limit least(p_limite, 200);
+end $$;
+
+-- Quem respondeu a um alerta (para a instituição dona do alerta)
+create or replace function public.respostas_do_alerta(p_alerta_id uuid)
+returns table (
+  doador_id uuid, nome_completo text, telefone text, tipo_sanguineo public.tipo_sanguineo,
+  resposta public.tipo_resposta, mensagem text, respondido_em timestamptz
+)
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if not (eh_admin() or exists (
+        select 1 from alertas a where a.id = p_alerta_id and sou_dono_instituicao(a.instituicao_id))) then
+    raise exception 'Sem permissão';
+  end if;
+
+  return query
+  select r.doador_id, p.nome_completo, p.telefone, d.tipo_sanguineo, r.resposta, r.mensagem, r.criado_em
+  from respostas_alertas r
+  join perfis p on p.id = r.doador_id
+  left join doadores d on d.utilizador_id = r.doador_id
+  where r.alerta_id = p_alerta_id
+  order by r.criado_em;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 10. VISTA PÚBLICA: qualquer pessoa vê só tipo sanguíneo + contacto
+-- ---------------------------------------------------------------------
+create view public.doadores_publicos as
+select d.tipo_sanguineo, p.telefone
+from public.doadores d
+join public.perfis p on p.id = d.utilizador_id
+where d.perfil_publico
+  and d.disponivel
+  and d.tipo_sanguineo is not null
+  and p.telefone is not null;
+
+-- ---------------------------------------------------------------------
+-- 11. ALERTAS: criação, código curto, envio, escalada
+-- ---------------------------------------------------------------------
+create or replace function public.alertas_antes_inserir()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare
+  v_cfg  configuracao_niveis_alerta;
+  v_inst instituicoes;
+begin
+  select * into v_cfg from configuracao_niveis_alerta where nivel = new.nivel;
+  select * into v_inst from instituicoes where id = new.instituicao_id;
+
+  if not found then
+    raise exception 'Instituição inexistente';
+  end if;
+  if v_inst.estado <> 'verificada' and not eh_admin() then
+    raise exception 'Instituição ainda não verificada';
+  end if;
+
+  if new.lat is null or new.lng is null then
+    new.lat := v_inst.lat;
+    new.lng := v_inst.lng;
+  end if;
+  if new.lat is null or new.lng is null then
+    raise exception 'Defina a localização da instituição ou do alerta';
+  end if;
+
+  new.estado := 'ativo';
+  new.raio_atual_km := v_cfg.raio_padrao_km;
+  new.expira_em := coalesce(new.expira_em, now() + make_interval(hours => v_cfg.expira_apos_horas));
+  return new;
+end $$;
+
+-- prefixos a_ e b_ garantem a ordem de execução dos triggers
+create trigger alertas_a_antes_inserir_trg
+  before insert on public.alertas
+  for each row execute function public.alertas_antes_inserir();
+
+create or replace function public.alertas_definir_codigo_curto()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v text; tentativas int := 0;
+begin
+  loop
+    v := lpad((floor(random() * 10000))::int::text, 4, '0');
+    exit when not exists (select 1 from alertas where codigo_curto = v and estado = 'ativo');
+    tentativas := tentativas + 1;
+    if tentativas > 50 then
+      v := lpad((floor(random() * 1000000))::int::text, 6, '0');
+      exit;
+    end if;
+  end loop;
+  new.codigo_curto := v;
+  return new;
+end $$;
+
+create trigger alertas_b_codigo_curto_trg
+  before insert on public.alertas
+  for each row execute function public.alertas_definir_codigo_curto();
+
+-- Cria as notificações (pendentes) para os doadores elegíveis
+create or replace function public.despachar_alerta(p_alerta_id uuid)
+returns integer language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_alerta alertas;
+  v_cfg    configuracao_niveis_alerta;
+  v_sangue int;
+  n        int;
+begin
+  select * into v_alerta from alertas where id = p_alerta_id and estado = 'ativo';
+  if not found or v_alerta.localizacao is null then return 0; end if;
+
+  select * into v_cfg from configuracao_niveis_alerta where nivel = v_alerta.nivel;
+  select id into v_sangue from categorias where slug = 'sangue';
+
+  insert into notificacoes (alerta_id, doador_id, canal, distancia_m)
+  select v_alerta.id, d.utilizador_id, c.canal,
+         round(st_distance(d.localizacao, v_alerta.localizacao))::int
+  from doadores d
+  cross join unnest(v_cfg.canais) as c(canal)
+  where d.disponivel
+    and d.localizacao is not null
+    and v_alerta.nivel >= d.nivel_minimo_alerta
+    and st_dwithin(d.localizacao, v_alerta.localizacao, v_alerta.raio_atual_km * 1000)
+    -- abaixo de "urgente" respeita a distância máxima escolhida pelo doador
+    and (v_alerta.nivel >= 'urgente'
+         or st_dwithin(d.localizacao, v_alerta.localizacao, d.distancia_maxima_km * 1000))
+    and (v_alerta.categoria_id is null or exists (
+          select 1 from doadores_categorias dc
+          where dc.doador_id = d.utilizador_id and dc.categoria_id = v_alerta.categoria_id))
+    -- alerta de sangue com tipo definido: só doadores compatíveis
+    and (v_alerta.tipo_sanguineo_necessario is null or exists (
+          select 1 from compatibilidade_sanguinea cs
+          where cs.tipo_doador = d.tipo_sanguineo
+            and cs.tipo_recetor = v_alerta.tipo_sanguineo_necessario))
+    -- alerta de sangue: só doadores aptos
+    and (v_alerta.categoria_id is distinct from v_sangue
+         or (select ap.apto from public.calcular_aptidao(d.utilizador_id) ap))
+  on conflict (alerta_id, doador_id, canal) do nothing;
+
+  get diagnostics n = row_count;
+  return n;
+end $$;
+
+create or replace function public.alertas_depois_inserir()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  perform despachar_alerta(new.id);
+  return new;
+end $$;
+
+create trigger alertas_depois_inserir_trg
+  after insert on public.alertas
+  for each row when (new.estado = 'ativo')
+  execute function public.alertas_depois_inserir();
+
+-- Expira alertas e alarga o raio dos que ainda não têm doadores suficientes
+create or replace function public.escalar_alertas()
+returns integer language plpgsql security definer set search_path = public as $$
+declare r record; total int := 0;
+begin
+  update alertas set estado = 'expirado'
+  where estado = 'ativo' and expira_em < now();
+
+  for r in
+    select a.id, a.raio_atual_km, c.raio_maximo_km
+    from alertas a
+    join configuracao_niveis_alerta c on c.nivel = a.nivel
+    where a.estado = 'ativo'
+      and c.escalar_apos_minutos is not null
+      and a.raio_atual_km < c.raio_maximo_km
+      and now() - coalesce(a.ultima_escalada_em, a.criado_em)
+          >= make_interval(mins => c.escalar_apos_minutos)
+      and (select count(*) from respostas_alertas ra
+           where ra.alerta_id = a.id and ra.resposta = 'aceite') < a.doadores_necessarios
+  loop
+    update alertas
+      set raio_atual_km      = least(r.raio_atual_km * 1.5, r.raio_maximo_km),
+          numero_escaladas   = numero_escaladas + 1,
+          ultima_escalada_em = now()
+      where id = r.id;
+    total := total + despachar_alerta(r.id);
+  end loop;
+  return total;
+end $$;
+
+select cron.schedule('escalar-alertas', '* * * * *', $$select public.escalar_alertas()$$);
+
+-- Fecha o alerta quando há aceites suficientes
+create or replace function public.respostas_depois_inserir()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  update alertas a set estado = 'cumprido'
+  where a.id = new.alerta_id and a.estado = 'ativo'
+    and (select count(*) from respostas_alertas
+         where alerta_id = a.id and resposta = 'aceite') >= a.doadores_necessarios;
+  return new;
+end $$;
+
+create trigger respostas_depois_inserir_trg
+  after insert on public.respostas_alertas
+  for each row execute function public.respostas_depois_inserir();
+
+-- ---------------------------------------------------------------------
+-- 12. DOAÇÕES REALIZADAS, ADMIN E SMS
+-- ---------------------------------------------------------------------
+-- Ao registar uma doação, atualiza a "última doação" do doador
+create or replace function public.doacoes_depois_inserir()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if new.categoria_id = (select id from categorias where slug = 'sangue') then
+    update doadores
+       set ultima_doacao_em = new.data_doacao
+     where utilizador_id = new.doador_id
+       and (ultima_doacao_em is null or ultima_doacao_em < new.data_doacao);
+  end if;
+  return new;
+end $$;
+
+create trigger doacoes_depois_inserir_trg
+  after insert on public.doacoes
+  for each row execute function public.doacoes_depois_inserir();
+
+create or replace function public.registar_doacao(
+  p_instituicao_id uuid,
+  p_doador_id      uuid,
+  p_data_doacao    timestamptz default now(),
+  p_categoria_id   int default null,
+  p_alerta_id      uuid default null,
+  p_volume_ml      int default null,
+  p_observacoes    text default null
+)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare v_id uuid; v_estado public.estado_instituicao;
+begin
+  if not (sou_dono_instituicao(p_instituicao_id) or eh_admin()) then
+    raise exception 'Sem permissão';
+  end if;
+  select estado into v_estado from instituicoes where id = p_instituicao_id;
+  if v_estado <> 'verificada' and not eh_admin() then
+    raise exception 'Instituição ainda não verificada';
+  end if;
+  if p_data_doacao > now() then
+    raise exception 'A data da doação não pode estar no futuro';
+  end if;
+
+  insert into doacoes (doador_id, instituicao_id, alerta_id, categoria_id, data_doacao,
+                       volume_ml, observacoes, registada_por)
+  values (p_doador_id, p_instituicao_id, p_alerta_id,
+          coalesce(p_categoria_id, (select id from categorias where slug = 'sangue')),
+          p_data_doacao, p_volume_ml, p_observacoes, auth.uid())
+  returning id into v_id;
+
+  return v_id;
+end $$;
+
+create or replace function public.definir_estado_instituicao(p_id uuid, p_estado public.estado_instituicao)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not eh_admin() then raise exception 'Apenas administradores'; end if;
+  update instituicoes
+     set estado = p_estado,
+         verificada_em = case when p_estado = 'verificada' then now() end
+   where id = p_id;
+end $$;
+
+-- Webhook de SMS (só service_role)
+create or replace function public.registar_resposta_sms(
+  p_telefone text, p_codigo text, p_resposta public.tipo_resposta
+)
+returns text language plpgsql security definer set search_path = public as $$
+declare v_tel text; v_doador uuid; v_alerta uuid;
+begin
+  v_tel := regexp_replace(coalesce(p_telefone, ''), '[^0-9+]', '', 'g');
+  if v_tel !~ '^\+' then v_tel := '+' || v_tel; end if;
+
+  select id into v_doador from perfis
+   where telefone = v_tel and papel = 'doador'
+   order by criado_em limit 1;
+  if v_doador is null then return 'telefone_desconhecido'; end if;
+
+  select a.id into v_alerta
+  from alertas a
+  where a.codigo_curto = trim(p_codigo)
+    and a.estado = 'ativo'
+    and exists (select 1 from notificacoes n where n.alerta_id = a.id and n.doador_id = v_doador);
+  if v_alerta is null then return 'sem_alerta_ativo'; end if;
+
+  insert into respostas_alertas (alerta_id, doador_id, resposta, mensagem)
+  values (v_alerta, v_doador, p_resposta, 'via SMS')
+  on conflict (alerta_id, doador_id) do nothing;
+
+  return 'ok';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 13. PERMISSÕES DE EXECUÇÃO DAS FUNÇÕES
+-- ---------------------------------------------------------------------
+-- internas: ninguém as chama pela API
+revoke execute on function public.despachar_alerta(uuid) from public, anon, authenticated;
+revoke execute on function public.escalar_alertas() from public, anon, authenticated;
+revoke execute on function public.calcular_aptidao(uuid) from public, anon, authenticated;
+
+revoke execute on function public.registar_resposta_sms(text, text, public.tipo_resposta)
+  from public, anon, authenticated;
+grant execute on function public.registar_resposta_sms(text, text, public.tipo_resposta) to service_role;
+
+-- só utilizadores autenticados
+revoke execute on function public.doadores_proximos(double precision, double precision, numeric, int, public.tipo_sanguineo, boolean, int) from public, anon;
+revoke execute on function public.doadores_proximos_da_instituicao(uuid, numeric, int, public.tipo_sanguineo, boolean, int) from public, anon;
+revoke execute on function public.instituicoes_proximas(double precision, double precision, numeric, public.tipo_instituicao) from public, anon;
+revoke execute on function public.candidatos_orgaos_proximos(uuid, numeric, int, int) from public, anon;
+revoke execute on function public.respostas_do_alerta(uuid) from public, anon;
+revoke execute on function public.minha_aptidao() from public, anon;
+revoke execute on function public.registar_doacao(uuid, uuid, timestamptz, int, uuid, int, text) from public, anon;
+revoke execute on function public.definir_estado_instituicao(uuid, public.estado_instituicao) from public, anon;
+
+-- ---------------------------------------------------------------------
+-- 14. GRANTS (por coluna) + RLS
+-- ---------------------------------------------------------------------
+alter table public.provincias                  enable row level security;
+alter table public.municipios                  enable row level security;
+alter table public.categorias                  enable row level security;
+alter table public.orgaos                      enable row level security;
+alter table public.compatibilidade_sanguinea   enable row level security;
+alter table public.configuracao_niveis_alerta  enable row level security;
+alter table public.perfis                      enable row level security;
+alter table public.doadores                    enable row level security;
+alter table public.doadores_categorias         enable row level security;
+alter table public.instituicoes                enable row level security;
+alter table public.alertas                     enable row level security;
+alter table public.notificacoes                enable row level security;
+alter table public.respostas_alertas           enable row level security;
+alter table public.doacoes                     enable row level security;
+alter table public.candidaturas_orgaos         enable row level security;
+alter table public.candidaturas_orgaos_itens   enable row level security;
+
+-- ponto de partida: nada para anon; só leitura para authenticated (a RLS filtra linhas)
+revoke all on all tables in schema public from anon, authenticated;
+grant select on all tables in schema public to authenticated;
+
+-- anon (visitante sem login): lista de municípios para o formulário e a vista pública
+grant select on public.provincias, public.municipios to anon;
+grant select on public.doadores_publicos to anon, authenticated;
+
+-- escrita por coluna
+grant update (nome_completo, telefone, url_avatar) on public.perfis to authenticated;
+
+grant insert (utilizador_id, tipo_sanguineo, sexo, data_nascimento, lat, lng, bairro, provincia_id, municipio_id,
+              distancia_maxima_km, nivel_minimo_alerta, disponivel, horario_preferencial, raio_deslocacao,
+              perfil_publico, partilhar_dados_saude, ultima_doacao_em, peso_kg, altura_cm,
+              doencas_cronicas, medicacao, tatuagem_recente, viagem_recente, fumador, consome_alcool)
+  on public.doadores to authenticated;
+grant update (tipo_sanguineo, sexo, data_nascimento, lat, lng, bairro, provincia_id, municipio_id,
+              distancia_maxima_km, nivel_minimo_alerta, disponivel, horario_preferencial, raio_deslocacao,
+              perfil_publico, partilhar_dados_saude, ultima_doacao_em, peso_kg, altura_cm,
+              doencas_cronicas, medicacao, tatuagem_recente, viagem_recente, fumador, consome_alcool)
+  on public.doadores to authenticated;
+
+grant insert, delete on public.doadores_categorias to authenticated;
+
+grant insert (dono_id, nome, tipo, descricao, nif, telefone, endereco, provincia_id, municipio_id, lat, lng)
+  on public.instituicoes to authenticated;
+grant update (nome, descricao, telefone, endereco, provincia_id, municipio_id, lat, lng)
+  on public.instituicoes to authenticated;
+
+grant insert (instituicao_id, categoria_id, tipo_sanguineo_necessario, nivel, titulo, corpo,
+              lat, lng, doadores_necessarios, expira_em)
+  on public.alertas to authenticated;
+grant update (estado, titulo, corpo) on public.alertas to authenticated;
+
+grant update (lida_em) on public.notificacoes to authenticated;
+grant insert (alerta_id, doador_id, resposta, mensagem) on public.respostas_alertas to authenticated;
+
+grant insert (doador_id, tipo_doacao, consentimento, observacoes) on public.candidaturas_orgaos to authenticated;
+grant update (tipo_doacao, estado, observacoes) on public.candidaturas_orgaos to authenticated;
+grant delete on public.candidaturas_orgaos to authenticated;
+grant insert, delete on public.candidaturas_orgaos_itens to authenticated;
+
+-- tabelas de referência
+create policy "provincias_leitura" on public.provincias for select to anon, authenticated using (true);
+create policy "municipios_leitura" on public.municipios for select to anon, authenticated using (true);
+create policy "categorias_leitura" on public.categorias for select to authenticated using (true);
+create policy "orgaos_leitura" on public.orgaos for select to authenticated using (true);
+create policy "compatibilidade_leitura" on public.compatibilidade_sanguinea for select to authenticated using (true);
+create policy "niveis_leitura" on public.configuracao_niveis_alerta for select to authenticated using (true);
+
+-- perfis
+create policy "perfis_ver_proprio_ou_admin" on public.perfis for select to authenticated
+  using (id = auth.uid() or eh_admin());
+create policy "perfis_atualizar_proprio" on public.perfis for update to authenticated
+  using (id = auth.uid()) with check (id = auth.uid());
+
+-- doadores (cada doador gere o seu cadastro)
+create policy "doadores_ver_proprio_ou_admin" on public.doadores for select to authenticated
+  using (utilizador_id = auth.uid() or eh_admin());
+create policy "doadores_inserir_proprio" on public.doadores for insert to authenticated
+  with check (utilizador_id = auth.uid());
+create policy "doadores_atualizar_proprio" on public.doadores for update to authenticated
+  using (utilizador_id = auth.uid()) with check (utilizador_id = auth.uid());
+
+create policy "doadores_categorias_proprias" on public.doadores_categorias for select to authenticated
+  using (doador_id = auth.uid() or eh_admin());
+create policy "doadores_categorias_inserir" on public.doadores_categorias for insert to authenticated
+  with check (doador_id = auth.uid());
+create policy "doadores_categorias_apagar" on public.doadores_categorias for delete to authenticated
+  using (doador_id = auth.uid());
+
+-- instituições
+create policy "instituicoes_ver" on public.instituicoes for select to authenticated
+  using (estado = 'verificada' or dono_id = auth.uid() or eh_admin());
+create policy "instituicoes_inserir_propria" on public.instituicoes for insert to authenticated
+  with check (dono_id = auth.uid() and meu_papel() = 'instituicao');
+create policy "instituicoes_atualizar_propria" on public.instituicoes for update to authenticated
+  using (dono_id = auth.uid()) with check (dono_id = auth.uid());
+
+-- alertas (a instituição só altera alertas ainda ativos)
+create policy "alertas_ver" on public.alertas for select to authenticated
+  using (
+    sou_dono_instituicao(instituicao_id)
+    or eh_admin()
+    or exists (select 1 from notificacoes n where n.alerta_id = alertas.id and n.doador_id = auth.uid())
+  );
+create policy "alertas_inserir_instituicao" on public.alertas for insert to authenticated
+  with check (sou_dono_instituicao(instituicao_id) or eh_admin());
+create policy "alertas_atualizar_instituicao" on public.alertas for update to authenticated
+  using ((sou_dono_instituicao(instituicao_id) and estado = 'ativo') or eh_admin())
+  with check (estado in ('ativo', 'cumprido', 'cancelado'));
+
+-- notificações
+create policy "notificacoes_ver_proprias" on public.notificacoes for select to authenticated
+  using (doador_id = auth.uid() or eh_admin());
+create policy "notificacoes_atualizar_proprias" on public.notificacoes for update to authenticated
+  using (doador_id = auth.uid()) with check (doador_id = auth.uid());
+
+-- respostas (só a alertas ativos para os quais o doador foi notificado)
+create policy "respostas_inserir_doador" on public.respostas_alertas for insert to authenticated
+  with check (
+    doador_id = auth.uid()
+    and exists (select 1 from notificacoes n
+                where n.alerta_id = respostas_alertas.alerta_id and n.doador_id = auth.uid())
+    and exists (select 1 from alertas a
+                where a.id = respostas_alertas.alerta_id and a.estado = 'ativo')
+  );
+create policy "respostas_ver" on public.respostas_alertas for select to authenticated
+  using (
+    doador_id = auth.uid()
+    or eh_admin()
+    or exists (select 1 from alertas a
+               where a.id = respostas_alertas.alerta_id and sou_dono_instituicao(a.instituicao_id))
+  );
+
+-- doações realizadas
+create policy "doacoes_ver" on public.doacoes for select to authenticated
+  using (doador_id = auth.uid() or sou_dono_instituicao(instituicao_id) or eh_admin());
+
+-- candidaturas a doador de órgãos (o doador gere; clínicas leem via função)
+create policy "candidaturas_ver_propria" on public.candidaturas_orgaos for select to authenticated
+  using (doador_id = auth.uid() or eh_admin());
+create policy "candidaturas_inserir_propria" on public.candidaturas_orgaos for insert to authenticated
+  with check (doador_id = auth.uid());
+create policy "candidaturas_atualizar_propria" on public.candidaturas_orgaos for update to authenticated
+  using (doador_id = auth.uid() and estado <> 'suspensa')
+  with check (doador_id = auth.uid() and estado in ('ativa', 'retirada'));
+create policy "candidaturas_apagar_propria" on public.candidaturas_orgaos for delete to authenticated
+  using (doador_id = auth.uid());
+
+create policy "candidaturas_itens_ver" on public.candidaturas_orgaos_itens for select to authenticated
+  using (exists (select 1 from candidaturas_orgaos c
+                 where c.id = candidatura_id and (c.doador_id = auth.uid() or eh_admin())));
+create policy "candidaturas_itens_inserir" on public.candidaturas_orgaos_itens for insert to authenticated
+  with check (exists (select 1 from candidaturas_orgaos c
+                      where c.id = candidatura_id and c.doador_id = auth.uid()));
+create policy "candidaturas_itens_apagar" on public.candidaturas_orgaos_itens for delete to authenticated
+  using (exists (select 1 from candidaturas_orgaos c
+                 where c.id = candidatura_id and c.doador_id = auth.uid()));
+
+-- ---------------------------------------------------------------------
+-- 15. REALTIME
+-- ---------------------------------------------------------------------
+alter publication supabase_realtime add table public.notificacoes, public.alertas, public.respostas_alertas;
+
+-- ---------------------------------------------------------------------
+-- 16. COMENTÁRIOS (documentação no próprio esquema)
+-- ---------------------------------------------------------------------
+comment on table public.provincias is 'As 21 províncias de Angola (referência nacional para doadores e instituições).';
+comment on table public.municipios is 'Municípios por província (referência opcional para doadores e instituições).';
+comment on table public.categorias is 'Tipos de ajuda: sangue, alimentos, roupa, medicamentos, etc.';
+comment on table public.orgaos is 'Catálogo de órgãos/tecidos e se podem ser doados em vida ou após a morte.';
+comment on table public.compatibilidade_sanguinea is 'Compatibilidade de glóbulos vermelhos: tipo_doador pode doar a tipo_recetor.';
+comment on table public.perfis is 'Perfil base de cada utilizador autenticado (doador, instituição ou admin).';
+comment on table public.doadores is 'Cadastro do doador: tipo sanguíneo, localização, preferências, privacidade e fatores de saúde.';
+comment on column public.doadores.perfil_publico is 'Se verdadeiro, tipo sanguíneo e telefone aparecem na vista pública doadores_publicos.';
+comment on column public.doadores.partilhar_dados_saude is 'Se verdadeiro, instituições verificadas próximas veem os fatores de saúde.';
+comment on column public.doadores.ultima_doacao_em is 'Atualizada automaticamente ao registar uma doação ou declarada pelo doador.';
+comment on table public.doadores_categorias is 'Categorias de alertas que o doador deseja receber.';
+comment on table public.instituicoes is 'Hospitais, clínicas, bancos de sangue e ONGs. Só as verificadas emitem alertas.';
+comment on column public.instituicoes.tipo is 'Apenas "clinica" verificada recebe candidaturas a doação de órgãos.';
+comment on table public.configuracao_niveis_alerta is 'Raio, canais, escalada e validade por nível de alerta.';
+comment on table public.alertas is 'Pedidos de ajuda emitidos por instituições verificadas.';
+comment on table public.notificacoes is 'Fila de notificações por doador e canal; um worker/Edge Function envia as pendentes.';
+comment on table public.respostas_alertas is 'Resposta (aceite/recusada) de cada doador a um alerta.';
+comment on table public.doacoes is 'Histórico de doações realizadas, registado pela instituição.';
+comment on table public.candidaturas_orgaos is 'Candidatura do doador a doação de órgãos, com consentimento expresso.';
+comment on table public.candidaturas_orgaos_itens is 'Órgãos escolhidos em cada candidatura.';
+comment on view  public.doadores_publicos is 'Vista pública: apenas tipo sanguíneo e telefone de doadores que aceitaram ser públicos.';
+
+-- ---------------------------------------------------------------------
+-- 17. PRIMEIRO ADMIN (executar manualmente, com o UUID do utilizador)
+-- ---------------------------------------------------------------------
+-- update public.perfis set papel = 'admin' where id = '<UUID_DO_UTILIZADOR>';
