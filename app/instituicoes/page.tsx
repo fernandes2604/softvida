@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { distanceKm, getCurrentLocation, type Coordinates } from "@/lib/geolocation";
 
 type Institution = {
   id: string;
@@ -31,14 +32,17 @@ const institutionTypes: Record<string, string> = {
 
 export default function InstituicoesPage() {
   const [institutions, setInstitutions] = useState<Institution[]>([]);
+  const [userLocation, setUserLocation] = useState<Coordinates | null>(null);
   const [enrollments, setEnrollments] = useState<Enrollment[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
   const [role, setRole] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
+  const [locating, setLocating] = useState(false);
   const [busyInstitution, setBusyInstitution] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [locationError, setLocationError] = useState<string | null>(null);
 
   const loadSession = useCallback(async () => {
     const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
@@ -113,11 +117,29 @@ export default function InstituicoesPage() {
     setBusyInstitution(null);
   };
 
+  const locateUser = async () => {
+    setLocating(true);
+    setLocationError(null);
+    try {
+      setUserLocation(await getCurrentLocation());
+    } catch (locationRequestError) {
+      setLocationError(locationRequestError instanceof Error
+        ? locationRequestError.message
+        : "Não foi possível determinar a localização deste dispositivo.");
+    } finally {
+      setLocating(false);
+    }
+  };
+
   const normalizedQuery = query.trim().toLocaleLowerCase("pt");
   const filteredInstitutions = institutions.filter((institution) =>
-    [institution.nome, institution.tipo, institution.endereco, institution.municipio, institution.provincia]
-      .filter(Boolean)
-      .some((value) => value!.toLocaleLowerCase("pt").includes(normalizedQuery)),
+    userLocation !== null
+      && institution.lat !== null
+      && institution.lng !== null
+      && distanceKm(userLocation, { lat: institution.lat, lng: institution.lng }) <= 25
+      && [institution.nome, institution.tipo, institution.endereco, institution.municipio, institution.provincia]
+        .filter(Boolean)
+        .some((value) => value!.toLocaleLowerCase("pt").includes(normalizedQuery)),
   );
 
   return (
@@ -141,6 +163,25 @@ export default function InstituicoesPage() {
         />
       </label>
 
+      <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <button
+          type="button"
+          onClick={() => void locateUser()}
+          disabled={locating}
+          className="rounded-xl bg-rose-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-wait disabled:opacity-60"
+        >
+          {locating ? "A obter localização…" : userLocation ? "Atualizar localização" : "Usar a minha localização"}
+        </button>
+        <p className="text-sm text-[var(--muted)]">
+          {userLocation ? "A mostrar instituições a até 25 km da sua localização." : "A localização é usada para filtrar instituições num raio de 25 km."}
+        </p>
+      </div>
+      {locationError && (
+        <p role="alert" className="mb-5 rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-[var(--danger)]">
+          {locationError}
+        </p>
+      )}
+
       {message && (
         <p
           role={message.type === "error" ? "alert" : "status"}
@@ -160,11 +201,15 @@ export default function InstituicoesPage() {
         </p>
       ) : error ? (
         <p role="alert" className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-6 text-[var(--danger)]">{error}</p>
+      ) : !userLocation ? (
+        <p className="rounded-2xl border border-[var(--panel-border)] bg-[var(--card)] p-6 text-[var(--muted)]">
+          Use a sua localização para ver instituições próximas.
+        </p>
       ) : filteredInstitutions.length === 0 ? (
         <p className="rounded-2xl border border-[var(--panel-border)] bg-[var(--card)] p-6 text-[var(--muted)]">
           {institutions.length === 0
             ? "Ainda não há instituições verificadas cadastradas."
-            : "Nenhuma instituição corresponde à sua pesquisa."}
+            : "Nenhuma instituição num raio de 25 km corresponde à sua pesquisa. Instituições sem coordenadas não podem ser filtradas por distância."}
         </p>
       ) : (
         <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">

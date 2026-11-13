@@ -1984,7 +1984,12 @@ as $$
 $$;
 
 drop function if exists public.pesquisar_pedidos_instituicoes(text);
-create or replace function public.pesquisar_pedidos_instituicoes(p_termo text)
+drop function if exists public.pesquisar_pedidos_instituicoes(text, double precision, double precision);
+create or replace function public.pesquisar_pedidos_instituicoes(
+  p_termo text,
+  p_lat double precision,
+  p_lng double precision
+)
 returns table (
   tipo_resultado text,
   id uuid,
@@ -2048,6 +2053,14 @@ as $$
   cross join termo t
   where t.valor <> ''
     and i.estado = 'verificada'
+    and p_lat between -90 and 90
+    and p_lng between -180 and 180
+    and i.localizacao is not null
+    and extensions.ST_DWithin(
+      i.localizacao,
+      extensions.ST_SetSRID(extensions.ST_MakePoint(p_lng, p_lat), 4326)::extensions.geography,
+      25000
+    )
     and (
       lower(i.nome) like '%' || t.valor || '%'
       or lower(i.tipo::text) like '%' || t.valor || '%'
@@ -2061,8 +2074,8 @@ $$;
 
 revoke all on function public.listar_pedidos_publicos() from public, anon, authenticated;
 grant execute on function public.listar_pedidos_publicos() to anon, authenticated;
-revoke all on function public.pesquisar_pedidos_instituicoes(text) from public, anon, authenticated;
-grant execute on function public.pesquisar_pedidos_instituicoes(text) to anon, authenticated;
+revoke all on function public.pesquisar_pedidos_instituicoes(text, double precision, double precision) from public, anon, authenticated;
+grant execute on function public.pesquisar_pedidos_instituicoes(text, double precision, double precision) to anon, authenticated;
 
 -- ---------------------------------------------------------------------
 -- 27. INSTITUIÇÕES PÚBLICAS E INSCRIÇÕES EM BANCOS DE SANGUE
@@ -2170,7 +2183,12 @@ comment on column public.doadores.mostrar_nome_localizacao is
   'Consentimento para exibir nome, telefone, tipo sanguíneo e província/município na busca autenticada de doadores.';
 
 drop function if exists public.pesquisar_doadores(text);
-create or replace function public.pesquisar_doadores(p_termo text)
+drop function if exists public.pesquisar_doadores(text, double precision, double precision);
+create or replace function public.pesquisar_doadores(
+  p_termo text,
+  p_lat double precision,
+  p_lng double precision
+)
 returns table (
   id uuid,
   nome text,
@@ -2199,7 +2217,14 @@ as $$
     and d.mostrar_nome_localizacao
     and d.tipo_sanguineo is not null
     and nullif(trim(pf.nome_completo), '') is not null
-    and (d.provincia_id is not null or d.municipio_id is not null)
+    and d.localizacao is not null
+    and p_lat between -90 and 90
+    and p_lng between -180 and 180
+    and extensions.ST_DWithin(
+      d.localizacao,
+      extensions.ST_SetSRID(extensions.ST_MakePoint(p_lng, p_lat), 4326)::extensions.geography,
+      25000
+    )
     and (
       lower(pf.nome_completo) like '%' || lower(trim(p_termo)) || '%'
       or lower(d.tipo_sanguineo::text) like '%' || lower(trim(p_termo)) || '%'
@@ -2233,5 +2258,5 @@ $$;
 
 revoke all on function public.definir_visibilidade_busca_doador(boolean) from public, anon, authenticated;
 grant execute on function public.definir_visibilidade_busca_doador(boolean) to authenticated;
-revoke all on function public.pesquisar_doadores(text) from public, anon, authenticated;
-grant execute on function public.pesquisar_doadores(text) to anon, authenticated;
+revoke all on function public.pesquisar_doadores(text, double precision, double precision) from public, anon, authenticated;
+grant execute on function public.pesquisar_doadores(text, double precision, double precision) to anon, authenticated;

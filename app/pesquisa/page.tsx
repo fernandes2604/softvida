@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { getCurrentLocation, type Coordinates } from "@/lib/geolocation";
 
 type Resultado = {
   tipo_resultado: "pedido" | "instituicao" | "doador";
@@ -34,8 +35,11 @@ function SearchResults() {
   const query = searchParams.get("q")?.trim() ?? "";
   const [results, setResults] = useState<Resultado[]>([]);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [userLocation, setUserLocation] = useState<Coordinates | null>(null);
+  const [locating, setLocating] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [locationError, setLocationError] = useState<string | null>(null);
   const pedidos = results.filter((result) => result.tipo_resultado === "pedido");
   const instituicoes = results.filter((result) => result.tipo_resultado === "instituicao");
   const doadores = results.filter((result) => result.tipo_resultado === "doador");
@@ -44,6 +48,20 @@ function SearchResults() {
     groups[institution] = [...(groups[institution] ?? []), pedido];
     return groups;
   }, {}));
+
+  const locateUser = async () => {
+    setLocating(true);
+    setLocationError(null);
+    try {
+      setUserLocation(await getCurrentLocation());
+    } catch (locationRequestError) {
+      setLocationError(locationRequestError instanceof Error
+        ? locationRequestError.message
+        : "Não foi possível determinar a localização deste dispositivo.");
+    } finally {
+      setLocating(false);
+    }
+  };
 
   const renderResult = (result: Resultado) => (
     <article key={`${result.tipo_resultado}-${result.id}`} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -125,8 +143,16 @@ function SearchResults() {
       setError(null);
       const [session, search, donors] = await Promise.all([
         supabase.auth.getSession(),
-        supabase.rpc("pesquisar_pedidos_instituicoes", { p_termo: query }),
-        supabase.rpc("pesquisar_doadores", { p_termo: query }),
+        supabase.rpc("pesquisar_pedidos_instituicoes", {
+          p_termo: query,
+          p_lat: userLocation?.lat ?? null,
+          p_lng: userLocation?.lng ?? null,
+        }),
+        supabase.rpc("pesquisar_doadores", {
+          p_termo: query,
+          p_lat: userLocation?.lat ?? null,
+          p_lng: userLocation?.lng ?? null,
+        }),
       ]);
       if (!active) return;
 
@@ -157,7 +183,7 @@ function SearchResults() {
     return () => {
       active = false;
     };
-  }, [query]);
+  }, [query, userLocation]);
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-12 sm:px-6 lg:px-8">
@@ -165,6 +191,24 @@ function SearchResults() {
       <h1 className="mt-2 break-words text-3xl font-bold text-slate-900 sm:text-4xl">
         Resultados para {query ? `“${query}”` : "a sua pesquisa"}
       </h1>
+      <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <button
+          type="button"
+          onClick={() => void locateUser()}
+          disabled={locating}
+          className="w-fit rounded-xl bg-rose-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-wait disabled:opacity-60"
+        >
+          {locating ? "A obter localização…" : userLocation ? "Atualizar localização" : "Usar a minha localização"}
+        </button>
+        <p className="text-sm text-slate-600">
+          {userLocation ? "Instituições e doadores são filtrados num raio de 25 km." : "Ative a localização para ver instituições e doadores próximos."}
+        </p>
+      </div>
+      {locationError && (
+        <p role="alert" className="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+          {locationError}
+        </p>
+      )}
 
       <section className="mt-8 space-y-4" aria-label="Resultados da pesquisa">
         {!query ? (
@@ -214,7 +258,9 @@ function SearchResults() {
                 <div className="space-y-3">
                   {instituicoes.length > 0
                     ? instituicoes.map(renderResult)
-                    : <p className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500">Nenhuma instituição encontrada.</p>}
+                    : <p className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500">
+                        {userLocation ? "Nenhuma instituição próxima corresponde à pesquisa." : "Ative a localização para ver instituições próximas."}
+                      </p>}
                 </div>
               </section>
 
@@ -223,7 +269,13 @@ function SearchResults() {
                 <div className="space-y-3">
                   {doadores.length > 0
                     ? doadores.map(renderResult)
-                    : <p className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500">Nenhum doador encontrado.</p>}
+                    : <p className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500">
+                        {!userLocation
+                          ? "Ative a localização para procurar doadores próximos."
+                          : isAuthenticated
+                            ? "Nenhum doador próximo corresponde à pesquisa ou autorizou a partilha dos seus dados."
+                            : "Inicie sessão para ver doadores próximos que autorizaram a partilha dos seus dados."}
+                      </p>}
                 </div>
               </section>
             </div>
