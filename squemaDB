@@ -1,9 +1,9 @@
 -- =====================================================================
 -- Plataforma Doadores <-> Instituições (Angola, âmbito nacional)
--- SQL COMPLETO (v3, em português)
+-- SQL COMPLETO (v4, em português) = v3 + PEDIDOS DE DOAÇÃO
 --
--- Executar num projeto Supabase novo (ou apagar antes as tabelas antigas
--- em inglês). Se "create extension pg_cron" falhar, ative-a primeiro em
+-- Executar num projeto Supabase novo (ou apagar antes as tabelas antigas).
+-- Se "create extension pg_cron" falhar, ative-a primeiro em
 -- Database > Extensions.
 --
 -- Regras principais:
@@ -16,6 +16,19 @@
 --  * Doador vê sempre os seus próprios dados de saúde, aptidão e tempo
 --    desde a última doação (minha_aptidao()).
 --  * Candidatura a doador de órgãos: só clínicas verificadas a recebem.
+--  * PEDIDOS DE DOAÇÃO (secções 18 a 25): qualquer pessoa pode solicitar;
+--    o pedido é atribuído à instituição verificada mais próxima, que
+--    aceita/recusa e atende no terreno. Recusa ou falta de resposta ->
+--    passa automaticamente para a seguinte mais próxima.
+--
+-- Fluxo dos pedidos:
+--  1. solicitar_doacao(...) -> devolve um código de acompanhamento.
+--  2. Atribuição à instituição verificada mais próxima (sangue -> só
+--     hospital/clínica/banco de sangue).
+--  3. responder_pedido (aceitar/recusar).
+--  4. atualizar_pedido: aceite -> em_deslocacao -> concluido.
+--  5. Opcional: criar_alerta_do_pedido (alerta para doadores próximos).
+--  6. O solicitante acompanha com acompanhar_pedido(codigo).
 -- =====================================================================
 
 create extension if not exists postgis with schema extensions;
@@ -37,6 +50,8 @@ create type public.tipo_sanguineo      as enum ('A+', 'A-', 'B+', 'B-', 'AB+', '
 create type public.sexo                as enum ('masculino', 'feminino');
 create type public.tipo_doacao_orgaos  as enum ('em_vida', 'apos_morte', 'ambos');
 create type public.estado_candidatura  as enum ('ativa', 'retirada', 'suspensa');
+create type public.estado_pedido       as enum
+  ('pendente', 'atribuido', 'aceite', 'em_deslocacao', 'concluido', 'cancelado');
 
 -- ---------------------------------------------------------------------
 -- 2. TABELAS DE REFERÊNCIA
@@ -61,15 +76,130 @@ create table public.municipios (
 
 create index municipios_provincia_idx on public.municipios (provincia_id);
 
--- Municípios de Benguela como ponto de partida. Importe os restantes
--- (lista oficial do INE) para as outras províncias; enquanto isso, doadores
--- e instituições funcionam só com a província (municipio_id é opcional).
+-- Municípios de Benguela (lista mais completa)
 insert into public.municipios (provincia_id, nome)
 select p.id, m.nome
 from public.provincias p,
      (values ('Benguela'), ('Baía Farta'), ('Balombo'), ('Bocoio'), ('Caimbambo'),
              ('Catumbela'), ('Chongorói'), ('Cubal'), ('Ganda'), ('Lobito')) as m(nome)
-where p.nome = 'Benguela';
+where p.nome = 'Benguela'
+on conflict (provincia_id, nome) do nothing;
+
+-- Municípios das restantes províncias (confirme com a lista oficial do INE;
+-- enquanto isso, municipio_id é opcional em doadores, instituições e pedidos)
+insert into public.municipios (provincia_id, nome)
+select p.id, m.nome
+from (values
+  ('Bengo', 'Ambriz'),
+  ('Bengo', 'Dande'),
+  ('Bengo', 'Nambuangongo'),
+  ('Bengo', 'Pango Aluquém'),
+  ('Bengo', 'Bengo'),
+  ('Benguela', 'Benguela'),
+  ('Benguela', 'Lobito'),
+  ('Benguela', 'Baía Farta'),
+  ('Benguela', 'Caimbambo'),
+  ('Benguela', 'Chongorói'),
+  ('Bié', 'Andulo'),
+  ('Bié', 'Camacupa'),
+  ('Bié', 'Catabola'),
+  ('Bié', 'Chitembo'),
+  ('Bié', 'Cuemba'),
+  ('Bié', 'N''harea'),
+  ('Cabinda', 'Belize'),
+  ('Cabinda', 'Cabinda'),
+  ('Cabinda', 'Cacongo'),
+  ('Cabinda', 'Buco-Zau'),
+  ('Cuando', 'Mavinga'),
+  ('Cuando', 'Menongue'),
+  ('Cuando', 'Nancova'),
+  ('Cuando', 'Cuanhama'),
+  ('Cuando', 'Cuchi'),
+  ('Cubango', 'Cuito Cuanavale'),
+  ('Cubango', 'Dirico'),
+  ('Cubango', 'Mucusso'),
+  ('Cubango', 'Naroa'),
+  ('Cubango', 'Rivungo'),
+  ('Cuanza Norte', 'Ambaca'),
+  ('Cuanza Norte', 'Bolongongo'),
+  ('Cuanza Norte', 'Cambambe'),
+  ('Cuanza Norte', 'Cazengo'),
+  ('Cuanza Norte', 'Golungo Alto'),
+  ('Cuanza Norte', 'N''dalatando'),
+  ('Cuanza Sul', 'Amboim'),
+  ('Cuanza Sul', 'Cassongue'),
+  ('Cuanza Sul', 'Ebo'),
+  ('Cuanza Sul', 'Libolo'),
+  ('Cuanza Sul', 'Porto Amboim'),
+  ('Cuanza Sul', 'Seles'),
+  ('Cunene', 'Cahama'),
+  ('Cunene', 'Cuanhama'),
+  ('Cunene', 'Curoca'),
+  ('Cunene', 'Namacunde'),
+  ('Cunene', 'Ombadja'),
+  ('Huambo', 'Bailundo'),
+  ('Huambo', 'Caála'),
+  ('Huambo', 'Huambo'),
+  ('Huambo', 'Longonjo'),
+  ('Huambo', 'Mungo'),
+  ('Huíla', 'Cacula'),
+  ('Huíla', 'Humpata'),
+  ('Huíla', 'Lubango'),
+  ('Huíla', 'Matala'),
+  ('Huíla', 'Quilengues'),
+  ('Huíla', 'Chibia'),
+  ('Icolo e Bengo', 'Icolo e Bengo'),
+  ('Icolo e Bengo', 'Quiçama'),
+  ('Luanda', 'Belas'),
+  ('Luanda', 'Cacuaco'),
+  ('Luanda', 'Cazenga'),
+  ('Luanda', 'Ingombota'),
+  ('Luanda', 'Kilamba Kiaxi'),
+  ('Luanda', 'Maianga'),
+  ('Luanda', 'Rangel'),
+  ('Luanda', 'Samba'),
+  ('Luanda', 'Sambizanga'),
+  ('Luanda', 'Viana'),
+  ('Lunda Norte', 'Cambulo'),
+  ('Lunda Norte', 'Chitato'),
+  ('Lunda Norte', 'Cuango'),
+  ('Lunda Norte', 'Dondo'),
+  ('Lunda Norte', 'Lubalo'),
+  ('Lunda Norte', 'Lunda Norte'),
+  ('Lunda Sul', 'Cacolo'),
+  ('Lunda Sul', 'Dala'),
+  ('Lunda Sul', 'Muconda'),
+  ('Lunda Sul', 'Saurimo'),
+  ('Malanje', 'Cacuso'),
+  ('Malanje', 'Calandula'),
+  ('Malanje', 'Kiwaba Nzoji'),
+  ('Malanje', 'Malanje'),
+  ('Malanje', 'Marimba'),
+  ('Moxico', 'Alto Zambeze'),
+  ('Moxico', 'Bundas'),
+  ('Moxico', 'Léua'),
+  ('Moxico', 'Moxico'),
+  ('Moxico', 'Luacano'),
+  ('Moxico Leste', 'Lagoa'),
+  ('Moxico Leste', 'Moxico Leste'),
+  ('Moxico Leste', 'Songo'),
+  ('Moxico Leste', 'Moxico'),
+  ('Namibe', 'Bibala'),
+  ('Namibe', 'Camucuio'),
+  ('Namibe', 'Moçâmedes'),
+  ('Namibe', 'Tômbwa'),
+  ('Uíge', 'Bungo'),
+  ('Uíge', 'Damba'),
+  ('Uíge', 'Mucaba'),
+  ('Uíge', 'Negage'),
+  ('Uíge', 'Uíge'),
+  ('Zaire', 'Mbanza Congo'),
+  ('Zaire', 'N''zeto'),
+  ('Zaire', 'Soyo'),
+  ('Zaire', 'Cuimba')
+) as m(provincia, nome)
+join public.provincias p on p.nome = m.provincia
+on conflict (provincia_id, nome) do nothing;
 
 create table public.categorias (
   id         serial primary key,
@@ -411,9 +541,10 @@ create trigger candidaturas_orgaos_itens_validar_trg
   for each row execute function public.validar_item_orgao();
 
 -- ---------------------------------------------------------------------
--- 7. CRIAÇÃO AUTOMÁTICA DE UTILIZADOR (auto-cadastro do doador)
+-- 7. CRIAÇÃO AUTOMÁTICA DE UTILIZADOR (auto-cadastro de doadores e instituições)
 -- Metadados aceites no signUp: papel, nome_completo, telefone,
--- tipo_sanguineo, sexo, data_nascimento, provincia, municipio
+-- tipo_sanguineo, sexo, data_nascimento, provincia, municipio,
+-- instituicao_nome, instituicao_tipo, instituicao_nif e bairro
 -- (também aceita role / full_name / phone por compatibilidade)
 -- ---------------------------------------------------------------------
 create or replace function public.tratar_novo_utilizador()
@@ -424,6 +555,7 @@ declare
   v_telefone     text;
   v_tipo         public.tipo_sanguineo;
   v_sexo         public.sexo;
+  v_tipo_instituicao public.tipo_instituicao;
   v_nascimento   date;
   v_municipio_id int;
   v_provincia_id int;
@@ -446,6 +578,16 @@ begin
   insert into perfis (id, papel, nome_completo, telefone)
   values (new.id, v_papel, coalesce(v_meta->>'nome_completo', v_meta->>'full_name'), v_telefone);
 
+  select id into v_provincia_id from provincias
+    where lower(nome) = lower(coalesce(v_meta->>'provincia', '')) limit 1;
+
+  select m.id, m.provincia_id into v_municipio_id, v_mun_prov from municipios m
+    where lower(m.nome) = lower(coalesce(v_meta->>'municipio', ''))
+      and (v_provincia_id is null or m.provincia_id = v_provincia_id)
+    limit 1;
+
+  v_provincia_id := coalesce(v_provincia_id, v_mun_prov);
+
   if v_papel = 'doador' then
     v_tipo := case when v_meta->>'tipo_sanguineo' = any (enum_range(null::public.tipo_sanguineo)::text[])
                    then (v_meta->>'tipo_sanguineo')::public.tipo_sanguineo end;
@@ -457,22 +599,40 @@ begin
       v_nascimento := null;
     end;
 
-    select id into v_provincia_id from provincias
-      where lower(nome) = lower(coalesce(v_meta->>'provincia', '')) limit 1;
-
-    select m.id, m.provincia_id into v_municipio_id, v_mun_prov from municipios m
-      where lower(m.nome) = lower(coalesce(v_meta->>'municipio', ''))
-        and (v_provincia_id is null or m.provincia_id = v_provincia_id)
-      limit 1;
-
-    v_provincia_id := coalesce(v_provincia_id, v_mun_prov);
-
     insert into doadores (utilizador_id, tipo_sanguineo, sexo, data_nascimento, provincia_id, municipio_id)
     values (new.id, v_tipo, v_sexo, v_nascimento, v_provincia_id, v_municipio_id);
 
     -- todo o doador recebe, por omissão, alertas de sangue
     insert into doadores_categorias (doador_id, categoria_id)
     select new.id, id from categorias where slug = 'sangue';
+  else
+    if nullif(trim(v_meta->>'instituicao_nome'), '') is null then
+      raise exception 'O nome da instituição é obrigatório';
+    end if;
+
+    v_tipo_instituicao := case
+      when v_meta->>'instituicao_tipo' = any (enum_range(null::public.tipo_instituicao)::text[])
+        then (v_meta->>'instituicao_tipo')::public.tipo_instituicao
+      else 'outra'::public.tipo_instituicao
+    end;
+
+    insert into instituicoes (
+      dono_id, nome, tipo, nif, telefone, endereco, provincia_id, municipio_id
+    )
+    values (
+      new.id,
+      trim(v_meta->>'instituicao_nome'),
+      v_tipo_instituicao,
+      nullif(trim(v_meta->>'instituicao_nif'), ''),
+      v_telefone,
+      nullif(concat_ws(', ',
+        nullif(trim(v_meta->>'bairro'), ''),
+        nullif(trim(v_meta->>'municipio'), ''),
+        nullif(trim(v_meta->>'provincia'), '')
+      ), ''),
+      v_provincia_id,
+      v_municipio_id
+    );
   end if;
 
   return new;
@@ -997,6 +1157,81 @@ begin
    where id = p_id;
 end $$;
 
+-- Resumo mínimo para o painel admin (não expõe fatores de saúde individuais)
+create or replace function public.admin_resumo_doadores()
+returns jsonb
+language plpgsql stable security definer
+set search_path = ''
+as $$
+declare
+  v_resultado jsonb;
+begin
+  if not public.eh_admin() then
+    raise exception 'Apenas administradores';
+  end if;
+
+  with doadores_admin as (
+    select
+      d.utilizador_id,
+      coalesce(p.nome_completo, 'Utilizador') as nome,
+      p.telefone,
+      d.tipo_sanguineo,
+      d.disponivel,
+      apt.apto as elegivel,
+      apt.proxima_doacao_em,
+      coalesce(assistencias.quantidade, 0) as doacoes_registadas
+    from public.doadores d
+    join public.perfis p on p.id = d.utilizador_id
+    cross join lateral public.calcular_aptidao(d.utilizador_id) apt
+    left join lateral (
+      select count(*)::int as quantidade
+      from public.doacoes dc
+      where dc.doador_id = d.utilizador_id
+    ) assistencias on true
+  )
+  select jsonb_build_object(
+    'total', count(*)::int,
+    'elegiveis', count(*) filter (where elegivel)::int,
+    'nao_elegiveis', count(*) filter (where not elegivel)::int,
+    'disponiveis', count(*) filter (where disponivel)::int,
+    'indisponiveis', count(*) filter (where not disponivel)::int,
+    'tipos_sanguineos', coalesce((
+      select jsonb_agg(
+        jsonb_build_object('tipo', grupos.tipo, 'quantidade', grupos.quantidade)
+        order by grupos.ordem
+      )
+      from (
+        select bg.tipo::text as tipo, bg.ordem, count(da.utilizador_id)::int as quantidade
+        from unnest(enum_range(null::public.tipo_sanguineo)) with ordinality as bg(tipo, ordem)
+        left join doadores_admin da on da.tipo_sanguineo = bg.tipo
+        group by bg.tipo, bg.ordem
+
+        union all
+
+        select 'Não informado', 9, count(*)::int
+        from doadores_admin da
+        where da.tipo_sanguineo is null
+      ) grupos
+    ), '[]'::jsonb),
+    'doadores', coalesce(jsonb_agg(
+      jsonb_build_object(
+        'id', utilizador_id,
+        'nome', nome,
+        'telefone', telefone,
+        'tipo_sanguineo', tipo_sanguineo,
+        'elegivel', elegivel,
+        'disponivel', disponivel,
+        'proxima_doacao_em', proxima_doacao_em,
+        'doacoes_registadas', doacoes_registadas
+      ) order by nome
+    ), '[]'::jsonb)
+  )
+  into v_resultado
+  from doadores_admin;
+
+  return v_resultado;
+end $$;
+
 -- Webhook de SMS (só service_role)
 create or replace function public.registar_resposta_sms(
   p_telefone text, p_codigo text, p_resposta public.tipo_resposta
@@ -1027,7 +1262,7 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 13. PERMISSÕES DE EXECUÇÃO DAS FUNÇÕES
+-- 13. PERMISSÕES DE EXECUÇÃO DAS FUNÇÕES (parte v3)
 -- ---------------------------------------------------------------------
 -- internas: ninguém as chama pela API
 revoke execute on function public.despachar_alerta(uuid) from public, anon, authenticated;
@@ -1047,9 +1282,12 @@ revoke execute on function public.respostas_do_alerta(uuid) from public, anon;
 revoke execute on function public.minha_aptidao() from public, anon;
 revoke execute on function public.registar_doacao(uuid, uuid, timestamptz, int, uuid, int, text) from public, anon;
 revoke execute on function public.definir_estado_instituicao(uuid, public.estado_instituicao) from public, anon;
+grant execute on function public.definir_estado_instituicao(uuid, public.estado_instituicao) to authenticated;
+revoke execute on function public.admin_resumo_doadores() from public, anon;
+grant execute on function public.admin_resumo_doadores() to authenticated;
 
 -- ---------------------------------------------------------------------
--- 14. GRANTS (por coluna) + RLS
+-- 14. GRANTS (por coluna) + RLS (parte v3)
 -- ---------------------------------------------------------------------
 alter table public.provincias                  enable row level security;
 alter table public.municipios                  enable row level security;
@@ -1113,10 +1351,13 @@ grant insert, delete on public.candidaturas_orgaos_itens to authenticated;
 -- tabelas de referência
 create policy "provincias_leitura" on public.provincias for select to anon, authenticated using (true);
 create policy "municipios_leitura" on public.municipios for select to anon, authenticated using (true);
-create policy "categorias_leitura" on public.categorias for select to authenticated using (true);
+create policy "categorias_leitura" on public.categorias for select to anon, authenticated using (true);
 create policy "orgaos_leitura" on public.orgaos for select to authenticated using (true);
 create policy "compatibilidade_leitura" on public.compatibilidade_sanguinea for select to authenticated using (true);
 create policy "niveis_leitura" on public.configuracao_niveis_alerta for select to authenticated using (true);
+
+-- (v4) o formulário público de pedidos precisa de listar as categorias sem login
+grant select on public.categorias to anon;
 
 -- perfis
 create policy "perfis_ver_proprio_ou_admin" on public.perfis for select to authenticated
@@ -1209,7 +1450,7 @@ create policy "candidaturas_itens_apagar" on public.candidaturas_orgaos_itens fo
                  where c.id = candidatura_id and c.doador_id = auth.uid()));
 
 -- ---------------------------------------------------------------------
--- 15. REALTIME
+-- 15. REALTIME (parte v3)
 -- ---------------------------------------------------------------------
 alter publication supabase_realtime add table public.notificacoes, public.alertas, public.respostas_alertas;
 
@@ -1242,117 +1483,460 @@ comment on view  public.doadores_publicos is 'Vista pública: apenas tipo sangu�
 -- 17. PRIMEIRO ADMIN (executar manualmente, com o UUID do utilizador)
 -- ---------------------------------------------------------------------
 -- update public.perfis set papel = 'admin' where id = '<UUID_DO_UTILIZADOR>';
--- Municípios (lista do ficheiro da página de perfil; confirme com a lista oficial do INE)
-insert into public.municipios (provincia_id, nome)
-select p.id, m.nome
-from (values
-  ('Bengo', 'Ambriz'),
-  ('Bengo', 'Dande'),
-  ('Bengo', 'Nambuangongo'),
-  ('Bengo', 'Pango Aluquém'),
-  ('Bengo', 'Bengo'),
-  ('Benguela', 'Benguela'),
-  ('Benguela', 'Lobito'),
-  ('Benguela', 'Baía Farta'),
-  ('Benguela', 'Caimbambo'),
-  ('Benguela', 'Chongorói'),
-  ('Bié', 'Andulo'),
-  ('Bié', 'Camacupa'),
-  ('Bié', 'Catabola'),
-  ('Bié', 'Chitembo'),
-  ('Bié', 'Cuemba'),
-  ('Bié', 'N''harea'),
-  ('Cabinda', 'Belize'),
-  ('Cabinda', 'Cabinda'),
-  ('Cabinda', 'Cacongo'),
-  ('Cabinda', 'Buco-Zau'),
-  ('Cuando', 'Mavinga'),
-  ('Cuando', 'Menongue'),
-  ('Cuando', 'Nancova'),
-  ('Cuando', 'Cuanhama'),
-  ('Cuando', 'Cuchi'),
-  ('Cubango', 'Cuito Cuanavale'),
-  ('Cubango', 'Dirico'),
-  ('Cubango', 'Mucusso'),
-  ('Cubango', 'Naroa'),
-  ('Cubango', 'Rivungo'),
-  ('Cuanza Norte', 'Ambaca'),
-  ('Cuanza Norte', 'Bolongongo'),
-  ('Cuanza Norte', 'Cambambe'),
-  ('Cuanza Norte', 'Cazengo'),
-  ('Cuanza Norte', 'Golungo Alto'),
-  ('Cuanza Norte', 'N''dalatando'),
-  ('Cuanza Sul', 'Amboim'),
-  ('Cuanza Sul', 'Cassongue'),
-  ('Cuanza Sul', 'Ebo'),
-  ('Cuanza Sul', 'Libolo'),
-  ('Cuanza Sul', 'Porto Amboim'),
-  ('Cuanza Sul', 'Seles'),
-  ('Cunene', 'Cahama'),
-  ('Cunene', 'Cuanhama'),
-  ('Cunene', 'Curoca'),
-  ('Cunene', 'Namacunde'),
-  ('Cunene', 'Ombadja'),
-  ('Huambo', 'Bailundo'),
-  ('Huambo', 'Caála'),
-  ('Huambo', 'Huambo'),
-  ('Huambo', 'Longonjo'),
-  ('Huambo', 'Mungo'),
-  ('Huíla', 'Cacula'),
-  ('Huíla', 'Humpata'),
-  ('Huíla', 'Lubango'),
-  ('Huíla', 'Matala'),
-  ('Huíla', 'Quilengues'),
-  ('Huíla', 'Chibia'),
-  ('Icolo e Bengo', 'Icolo e Bengo'),
-  ('Icolo e Bengo', 'Quiçama'),
-  ('Luanda', 'Belas'),
-  ('Luanda', 'Cacuaco'),
-  ('Luanda', 'Cazenga'),
-  ('Luanda', 'Ingombota'),
-  ('Luanda', 'Kilamba Kiaxi'),
-  ('Luanda', 'Maianga'),
-  ('Luanda', 'Rangel'),
-  ('Luanda', 'Samba'),
-  ('Luanda', 'Sambizanga'),
-  ('Luanda', 'Viana'),
-  ('Lunda Norte', 'Cambulo'),
-  ('Lunda Norte', 'Chitato'),
-  ('Lunda Norte', 'Cuango'),
-  ('Lunda Norte', 'Dondo'),
-  ('Lunda Norte', 'Lubalo'),
-  ('Lunda Norte', 'Lunda Norte'),
-  ('Lunda Sul', 'Cacolo'),
-  ('Lunda Sul', 'Dala'),
-  ('Lunda Sul', 'Muconda'),
-  ('Lunda Sul', 'Saurimo'),
-  ('Malanje', 'Cacuso'),
-  ('Malanje', 'Calandula'),
-  ('Malanje', 'Kiwaba Nzoji'),
-  ('Malanje', 'Malanje'),
-  ('Malanje', 'Marimba'),
-  ('Moxico', 'Alto Zambeze'),
-  ('Moxico', 'Bundas'),
-  ('Moxico', 'Léua'),
-  ('Moxico', 'Moxico'),
-  ('Moxico', 'Luacano'),
-  ('Moxico Leste', 'Lagoa'),
-  ('Moxico Leste', 'Moxico Leste'),
-  ('Moxico Leste', 'Songo'),
-  ('Moxico Leste', 'Moxico'),
-  ('Namibe', 'Bibala'),
-  ('Namibe', 'Camucuio'),
-  ('Namibe', 'Moçâmedes'),
-  ('Namibe', 'Tômbwa'),
-  ('Uíge', 'Bungo'),
-  ('Uíge', 'Damba'),
-  ('Uíge', 'Mucaba'),
-  ('Uíge', 'Negage'),
-  ('Uíge', 'Uíge'),
-  ('Zaire', 'Mbanza Congo'),
-  ('Zaire', 'N''zeto'),
-  ('Zaire', 'Soyo'),
-  ('Zaire', 'Cuimba')
-) as m(provincia, nome)
-join public.provincias p on p.nome = m.provincia
-on conflict (provincia_id, nome) do nothing;
+
+
+-- =====================================================================
+-- PARTE v4: PEDIDOS DE DOAÇÃO (qualquer pessoa pode solicitar)
+-- Privacidade: o telefone do solicitante só é visto pela instituição
+-- atribuída, pelo próprio utilizador (se tinha login) e pelo admin.
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- 18. TABELAS DOS PEDIDOS
+-- ---------------------------------------------------------------------
+create table public.pedidos_doacao (
+  id                        uuid primary key default gen_random_uuid(),
+  codigo                    text not null unique,                 -- código de acompanhamento
+  utilizador_id             uuid references public.perfis(id) on delete set null,  -- nulo se anónimo
+  nome_solicitante          text not null check (length(trim(nome_solicitante)) between 2 and 120),
+  telefone_solicitante      text not null check (telefone_solicitante ~ '^\+[1-9][0-9]{7,14}$'),
+  categoria_id              int  not null references public.categorias(id),
+  tipo_sanguineo_necessario public.tipo_sanguineo,
+  quantidade                int  not null default 1 check (quantidade between 1 and 1000),
+  descricao                 text check (descricao is null or length(descricao) <= 1000),
+  nivel                     public.nivel_alerta not null default 'atencao',
+  -- onde a ajuda é necessária (local de atendimento no terreno)
+  lat                       double precision check (lat between -90 and 90),
+  lng                       double precision check (lng between -180 and 180),
+  localizacao               geography(Point, 4326) generated always as (
+                              case
+                                when lat is not null and lng is not null
+                                then ST_SetSRID(ST_MakePoint(lng, lat), 4326)::geography
+                                else null
+                              end
+                            ) stored,
+  endereco                  text,
+  provincia_id              int references public.provincias(id),
+  municipio_id              int references public.municipios(id),
+  -- tratamento
+  estado                    public.estado_pedido not null default 'pendente',
+  instituicao_id            uuid references public.instituicoes(id) on delete set null,
+  atribuido_em              timestamptz,
+  aceite_em                 timestamptz,
+  concluido_em              timestamptz,
+  notas_instituicao         text,
+  alerta_id                 uuid references public.alertas(id) on delete set null,
+  criado_em                 timestamptz not null default now(),
+  atualizado_em             timestamptz not null default now(),
+  constraint pedido_coordenadas_ck check ((lat is null) = (lng is null)),
+  constraint pedido_local_ck check (lat is not null or provincia_id is not null)
+);
+
+create index pedidos_doacao_localizacao_gix on public.pedidos_doacao using gist (localizacao);
+create index pedidos_doacao_instituicao_idx on public.pedidos_doacao (instituicao_id, estado);
+create index pedidos_doacao_estado_idx      on public.pedidos_doacao (estado, criado_em);
+create index pedidos_doacao_telefone_idx    on public.pedidos_doacao (telefone_solicitante, criado_em desc);
+create index pedidos_doacao_utilizador_idx  on public.pedidos_doacao (utilizador_id);
+
+create trigger pedidos_doacao_carimbo_trg
+  before update on public.pedidos_doacao
+  for each row execute function public.carimbar_atualizado_em();
+
+-- Histórico de instituições a quem o pedido foi atribuído
+create table public.pedidos_tentativas (
+  id             uuid primary key default gen_random_uuid(),
+  pedido_id      uuid not null references public.pedidos_doacao(id) on delete cascade,
+  instituicao_id uuid not null references public.instituicoes(id) on delete cascade,
+  atribuido_em   timestamptz not null default now(),
+  respondido_em  timestamptz,
+  resultado      text not null default 'pendente'
+                 check (resultado in ('pendente', 'aceite', 'recusado', 'expirado')),
+  motivo         text,
+  unique (pedido_id, instituicao_id)
+);
+
+create index pedidos_tentativas_instituicao_idx on public.pedidos_tentativas (instituicao_id);
+
+-- ---------------------------------------------------------------------
+-- 19. FUNÇÕES INTERNAS DOS PEDIDOS
+-- ---------------------------------------------------------------------
+-- Código de 8 caracteres sem letras ambíguas (I, L, O) nem 0/1
+create or replace function public.gerar_codigo_pedido()
+returns text language plpgsql security definer set search_path = public as $$
+declare
+  v_alfabeto constant text := 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  v_bytes    bytea;
+  v          text;
+  i          int;
+begin
+  loop
+    v_bytes := decode(replace(gen_random_uuid()::text, '-', ''), 'hex');
+    v := '';
+    for i in 0..7 loop
+      v := v || substr(v_alfabeto, 1 + (get_byte(v_bytes, i) % length(v_alfabeto)), 1);
+    end loop;
+    exit when not exists (select 1 from pedidos_doacao where codigo = v);
+  end loop;
+  return v;
+end $$;
+
+-- Atribui o pedido pendente à instituição verificada mais próxima que
+-- ainda não tenha sido tentada. Devolve o id da instituição (ou nulo).
+create or replace function public.atribuir_pedido(p_pedido_id uuid)
+returns uuid language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_p      pedidos_doacao;
+  v_inst   uuid;
+  v_sangue int;
+begin
+  select * into v_p from pedidos_doacao
+   where id = p_pedido_id and estado = 'pendente'
+   for update;
+  if not found then return null; end if;
+
+  select id into v_sangue from categorias where slug = 'sangue';
+
+  select i.id into v_inst
+  from instituicoes i
+  where i.estado = 'verificada'
+    and not exists (select 1 from pedidos_tentativas t
+                    where t.pedido_id = v_p.id and t.instituicao_id = i.id)
+    -- sangue: apenas instituições com capacidade clínica
+    and (v_p.categoria_id is distinct from v_sangue
+         or i.tipo in ('hospital', 'clinica', 'banco_de_sangue'))
+  order by
+    case when v_p.localizacao is not null and i.localizacao is not null
+         then st_distance(i.localizacao, v_p.localizacao)
+         else 1e12::float8 end,
+    -- sem coordenadas: prefere o mesmo município, depois a mesma província
+    coalesce(i.municipio_id = v_p.municipio_id, false) desc,
+    coalesce(i.provincia_id = v_p.provincia_id, false) desc,
+    i.criado_em
+  limit 1;
+
+  if v_inst is null then return null; end if;
+
+  insert into pedidos_tentativas (pedido_id, instituicao_id) values (v_p.id, v_inst);
+
+  update pedidos_doacao
+     set instituicao_id = v_inst,
+         estado = 'atribuido',
+         atribuido_em = now()
+   where id = v_p.id;
+
+  return v_inst;
+end $$;
+
+-- Reatribui pedidos sem resposta a tempo e tenta de novo os sem instituição.
+-- Tempo para responder: critico 10 min, urgente 15 min, restantes 30 min.
+create or replace function public.reatribuir_pedidos()
+returns integer language plpgsql security definer set search_path = public as $$
+declare r record; total int := 0;
+begin
+  for r in
+    select p.id from pedidos_doacao p
+    where p.estado = 'atribuido'
+      and p.atribuido_em < now() - make_interval(mins =>
+            case p.nivel when 'critico' then 10 when 'urgente' then 15 else 30 end)
+  loop
+    update pedidos_tentativas
+       set resultado = 'expirado', respondido_em = now()
+     where pedido_id = r.id and resultado = 'pendente';
+
+    update pedidos_doacao
+       set estado = 'pendente', instituicao_id = null, atribuido_em = null
+     where id = r.id;
+  end loop;
+
+  for r in
+    select id from pedidos_doacao where estado = 'pendente' order by criado_em
+  loop
+    if atribuir_pedido(r.id) is not null then total := total + 1; end if;
+  end loop;
+
+  return total;
+end $$;
+
+select cron.schedule('reatribuir-pedidos', '* * * * *', $$select public.reatribuir_pedidos()$$);
+
+-- ---------------------------------------------------------------------
+-- 20. FUNÇÕES PÚBLICAS DOS PEDIDOS (qualquer pessoa, mesmo sem login)
+-- ---------------------------------------------------------------------
+create or replace function public.solicitar_doacao(
+  p_nome           text,
+  p_telefone       text,
+  p_categoria_id   int,
+  p_descricao      text default null,
+  p_lat            double precision default null,
+  p_lng            double precision default null,
+  p_endereco       text default null,
+  p_provincia_id   int default null,
+  p_municipio_id   int default null,
+  p_tipo_sanguineo public.tipo_sanguineo default null,
+  p_quantidade     int default 1,
+  p_nivel          public.nivel_alerta default 'atencao'
+)
+returns table (o_codigo text, o_estado public.estado_pedido, o_instituicao text)
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_tel      text;
+  v_id       uuid;
+  v_codigo   text;
+  v_mun_prov int;
+begin
+  -- normaliza o telefone (aceita 9XXXXXXXX, 244..., 00244... ou +244...)
+  v_tel := regexp_replace(coalesce(p_telefone, ''), '[^0-9+]', '', 'g');
+  if    v_tel ~ '^9[0-9]{8}$'    then v_tel := '+244' || v_tel;
+  elsif v_tel ~ '^244[0-9]{9}$'  then v_tel := '+' || v_tel;
+  elsif v_tel ~ '^00'            then v_tel := '+' || substr(v_tel, 3);
+  end if;
+  if v_tel !~ '^\+[1-9][0-9]{7,14}$' then
+    raise exception 'Telefone inválido';
+  end if;
+
+  if p_nome is null or length(trim(p_nome)) < 2 then
+    raise exception 'Indique o seu nome';
+  end if;
+  if not exists (select 1 from categorias where id = p_categoria_id) then
+    raise exception 'Categoria inválida';
+  end if;
+  if (p_lat is null) <> (p_lng is null) then
+    raise exception 'Indique latitude e longitude em conjunto';
+  end if;
+
+  -- deduz a província a partir do município, se necessário
+  if p_provincia_id is null and p_municipio_id is not null then
+    select provincia_id into v_mun_prov from municipios where id = p_municipio_id;
+  end if;
+  if p_lat is null and coalesce(p_provincia_id, v_mun_prov) is null then
+    raise exception 'Indique a localização (GPS) ou, pelo menos, a província';
+  end if;
+
+  -- proteção básica contra abuso (anónimos): máx. 5 pedidos / 24 h por telefone
+  if (select count(*) from pedidos_doacao
+       where telefone_solicitante = v_tel
+         and criado_em > now() - interval '24 hours') >= 5 then
+    raise exception 'Demasiados pedidos com este telefone. Tente mais tarde.';
+  end if;
+
+  v_codigo := gerar_codigo_pedido();
+
+  insert into pedidos_doacao (
+    codigo, utilizador_id, nome_solicitante, telefone_solicitante, categoria_id,
+    tipo_sanguineo_necessario, quantidade, descricao, nivel, lat, lng, endereco,
+    provincia_id, municipio_id)
+  values (
+    v_codigo, auth.uid(), trim(p_nome), v_tel, p_categoria_id,
+    p_tipo_sanguineo, greatest(coalesce(p_quantidade, 1), 1), p_descricao, p_nivel, p_lat, p_lng, p_endereco,
+    coalesce(p_provincia_id, v_mun_prov), p_municipio_id)
+  returning id into v_id;
+
+  perform atribuir_pedido(v_id);
+
+  return query
+  select p.codigo, p.estado, i.nome
+  from pedidos_doacao p
+  left join instituicoes i on i.id = p.instituicao_id
+  where p.id = v_id;
+end $$;
+
+-- Acompanhamento pelo código (o contacto da instituição só aparece depois de aceite)
+create or replace function public.acompanhar_pedido(p_codigo text)
+returns table (
+  estado public.estado_pedido, categoria text, criado_em timestamptz,
+  instituicao_nome text, instituicao_telefone text, instituicao_endereco text,
+  aceite_em timestamptz, concluido_em timestamptz
+)
+language sql stable security definer set search_path = public as $$
+  select p.estado, c.nome, p.criado_em,
+         case when p.estado in ('atribuido','aceite','em_deslocacao','concluido') then i.nome end,
+         case when p.estado in ('aceite','em_deslocacao','concluido') then i.telefone end,
+         case when p.estado in ('aceite','em_deslocacao','concluido') then i.endereco end,
+         p.aceite_em, p.concluido_em
+  from pedidos_doacao p
+  join categorias c on c.id = p.categoria_id
+  left join instituicoes i on i.id = p.instituicao_id
+  where p.codigo = upper(trim(p_codigo));
+$$;
+
+create or replace function public.cancelar_meu_pedido(p_codigo text)
+returns boolean language plpgsql security definer set search_path = public as $$
+declare v_id uuid;
+begin
+  update pedidos_doacao
+     set estado = 'cancelado'
+   where codigo = upper(trim(p_codigo))
+     and estado in ('pendente', 'atribuido', 'aceite')
+  returning id into v_id;
+
+  if v_id is not null then
+    -- fecha a tentativa que ainda estava a aguardar resposta
+    update pedidos_tentativas
+       set resultado = 'expirado', respondido_em = now()
+     where pedido_id = v_id and resultado = 'pendente';
+  end if;
+
+  return v_id is not null;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 21. FUNÇÕES DA INSTITUIÇÃO
+-- ---------------------------------------------------------------------
+-- Aceitar ou recusar um pedido atribuído. Se recusar, passa à próxima instituição.
+create or replace function public.responder_pedido(
+  p_pedido_id uuid, p_aceitar boolean, p_motivo text default null
+)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_p pedidos_doacao;
+begin
+  select * into v_p from pedidos_doacao where id = p_pedido_id for update;
+  if not found then raise exception 'Pedido inexistente'; end if;
+  if not sou_dono_instituicao(v_p.instituicao_id) then raise exception 'Sem permissão'; end if;
+  if v_p.estado <> 'atribuido' then
+    raise exception 'O pedido já não está a aguardar resposta';
+  end if;
+
+  if p_aceitar then
+    update pedidos_tentativas
+       set resultado = 'aceite', respondido_em = now()
+     where pedido_id = v_p.id and instituicao_id = v_p.instituicao_id;
+    update pedidos_doacao set estado = 'aceite', aceite_em = now() where id = v_p.id;
+  else
+    update pedidos_tentativas
+       set resultado = 'recusado', respondido_em = now(), motivo = p_motivo
+     where pedido_id = v_p.id and instituicao_id = v_p.instituicao_id;
+    update pedidos_doacao
+       set estado = 'pendente', instituicao_id = null, atribuido_em = null
+     where id = v_p.id;
+    perform atribuir_pedido(v_p.id);
+  end if;
+end $$;
+
+-- Atendimento no terreno: aceite -> em_deslocacao -> concluido
+create or replace function public.atualizar_pedido(
+  p_pedido_id uuid, p_estado public.estado_pedido, p_notas text default null
+)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_p pedidos_doacao;
+begin
+  select * into v_p from pedidos_doacao where id = p_pedido_id for update;
+  if not found then raise exception 'Pedido inexistente'; end if;
+  if not sou_dono_instituicao(v_p.instituicao_id) then raise exception 'Sem permissão'; end if;
+
+  if p_estado = 'em_deslocacao' and v_p.estado <> 'aceite' then
+    raise exception 'Só um pedido aceite pode passar a "em deslocação"';
+  elsif p_estado = 'concluido' and v_p.estado not in ('aceite', 'em_deslocacao') then
+    raise exception 'Só um pedido aceite ou em deslocação pode ser concluído';
+  elsif p_estado not in ('em_deslocacao', 'concluido') then
+    raise exception 'Estado não permitido';
+  end if;
+
+  update pedidos_doacao
+     set estado = p_estado,
+         notas_instituicao = coalesce(p_notas, notas_instituicao),
+         concluido_em = case when p_estado = 'concluido' then now() else concluido_em end
+   where id = v_p.id;
+end $$;
+
+-- Transforma o pedido aceite num alerta para os doadores próximos
+create or replace function public.criar_alerta_do_pedido(
+  p_pedido_id uuid, p_nivel public.nivel_alerta default null
+)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare v_p pedidos_doacao; v_cat text; v_alerta uuid;
+begin
+  select * into v_p from pedidos_doacao where id = p_pedido_id for update;
+  if not found then raise exception 'Pedido inexistente'; end if;
+  if not sou_dono_instituicao(v_p.instituicao_id) then raise exception 'Sem permissão'; end if;
+  if v_p.estado not in ('aceite', 'em_deslocacao') then
+    raise exception 'Aceite o pedido antes de criar o alerta';
+  end if;
+  if v_p.alerta_id is not null then
+    raise exception 'Este pedido já tem um alerta';
+  end if;
+
+  select nome into v_cat from categorias where id = v_p.categoria_id;
+
+  insert into alertas (instituicao_id, categoria_id, tipo_sanguineo_necessario, nivel,
+                       titulo, corpo, lat, lng, doadores_necessarios)
+  values (v_p.instituicao_id, v_p.categoria_id, v_p.tipo_sanguineo_necessario,
+          coalesce(p_nivel, v_p.nivel),
+          'Pedido de doação: ' || v_cat, v_p.descricao, v_p.lat, v_p.lng, v_p.quantidade)
+  returning id into v_alerta;
+
+  update pedidos_doacao set alerta_id = v_alerta where id = v_p.id;
+  return v_alerta;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 22. ADMIN: atribuição manual (quando nenhuma instituição aceita)
+-- ---------------------------------------------------------------------
+create or replace function public.atribuir_pedido_manual(p_pedido_id uuid, p_instituicao_id uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not eh_admin() then raise exception 'Apenas administradores'; end if;
+  if not exists (select 1 from instituicoes where id = p_instituicao_id and estado = 'verificada') then
+    raise exception 'Instituição inexistente ou não verificada';
+  end if;
+
+  update pedidos_tentativas
+     set resultado = 'expirado', respondido_em = now()
+   where pedido_id = p_pedido_id and resultado = 'pendente';
+
+  insert into pedidos_tentativas (pedido_id, instituicao_id)
+  values (p_pedido_id, p_instituicao_id)
+  on conflict (pedido_id, instituicao_id)
+  do update set resultado = 'pendente', atribuido_em = now(), respondido_em = null;
+
+  update pedidos_doacao
+     set instituicao_id = p_instituicao_id, estado = 'atribuido', atribuido_em = now()
+   where id = p_pedido_id and estado in ('pendente', 'atribuido');
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 23. PERMISSÕES DE EXECUÇÃO (parte v4)
+-- ---------------------------------------------------------------------
+-- internas
+revoke execute on function public.gerar_codigo_pedido()        from public, anon, authenticated;
+revoke execute on function public.atribuir_pedido(uuid)        from public, anon, authenticated;
+revoke execute on function public.reatribuir_pedidos()         from public, anon, authenticated;
+
+-- públicas (visitante sem login incluído)
+revoke execute on function public.solicitar_doacao(text, text, int, text, double precision, double precision, text, int, int, public.tipo_sanguineo, int, public.nivel_alerta) from public;
+grant  execute on function public.solicitar_doacao(text, text, int, text, double precision, double precision, text, int, int, public.tipo_sanguineo, int, public.nivel_alerta) to anon, authenticated;
+
+revoke execute on function public.acompanhar_pedido(text)   from public;
+grant  execute on function public.acompanhar_pedido(text)   to anon, authenticated;
+revoke execute on function public.cancelar_meu_pedido(text) from public;
+grant  execute on function public.cancelar_meu_pedido(text) to anon, authenticated;
+
+-- só autenticados (a própria função valida se é a instituição / admin)
+revoke execute on function public.responder_pedido(uuid, boolean, text)               from public, anon;
+revoke execute on function public.atualizar_pedido(uuid, public.estado_pedido, text)  from public, anon;
+revoke execute on function public.criar_alerta_do_pedido(uuid, public.nivel_alerta)   from public, anon;
+revoke execute on function public.atribuir_pedido_manual(uuid, uuid)                  from public, anon;
+
+-- ---------------------------------------------------------------------
+-- 24. RLS DOS PEDIDOS (escrita apenas através das funções acima)
+-- ---------------------------------------------------------------------
+alter table public.pedidos_doacao     enable row level security;
+alter table public.pedidos_tentativas enable row level security;
+
+revoke all on public.pedidos_doacao, public.pedidos_tentativas from anon, authenticated;
+grant select on public.pedidos_doacao, public.pedidos_tentativas to authenticated;
+
+create policy "pedidos_ver" on public.pedidos_doacao for select to authenticated
+  using (utilizador_id = auth.uid() or sou_dono_instituicao(instituicao_id) or eh_admin());
+
+create policy "pedidos_tentativas_ver" on public.pedidos_tentativas for select to authenticated
+  using (sou_dono_instituicao(instituicao_id) or eh_admin());
+
+-- ---------------------------------------------------------------------
+-- 25. REALTIME E COMENTÁRIOS DOS PEDIDOS
+-- (a instituição vê novos pedidos em tempo real; a RLS filtra)
+-- ---------------------------------------------------------------------
+alter publication supabase_realtime add table public.pedidos_doacao;
+
+comment on table public.pedidos_doacao is 'Pedidos de doação feitos por qualquer pessoa; atribuídos à instituição verificada mais próxima, que os atende no terreno.';
+comment on table public.pedidos_tentativas is 'Histórico de instituições a quem cada pedido foi atribuído (aceite, recusado ou expirado).';
+comment on column public.pedidos_doacao.codigo is 'Código de acompanhamento entregue ao solicitante (permite consultar e cancelar sem login).';

@@ -12,6 +12,7 @@ const tabs = [
 ] as const;
 
 type AuthTab = (typeof tabs)[number]["id"];
+type InstitutionType = "hospital" | "clinica" | "banco_de_sangue" | "ong" | "outra";
 
 type FormState = {
   email: string;
@@ -20,11 +21,20 @@ type FormState = {
   phone: string;
   userType: "doador" | "instituicao";
   institutionName: string;
+  institutionType: InstitutionType;
   nif: string;
   province: string;
   municipality: string;
   neighborhood: string;
 };
+
+const institutionTypes: { value: InstitutionType; label: string }[] = [
+  { value: "hospital", label: "Hospital" },
+  { value: "clinica", label: "Clínica" },
+  { value: "banco_de_sangue", label: "Banco de sangue" },
+  { value: "ong", label: "ONG" },
+  { value: "outra", label: "Outra" },
+];
 
 const provinces = [
   "Bengo",
@@ -81,6 +91,7 @@ const initialState: FormState = {
   phone: "",
   userType: "doador",
   institutionName: "",
+  institutionType: "outra",
   nif: "",
   province: "",
   municipality: "",
@@ -178,6 +189,10 @@ export default function AuthPage() {
         throw new Error("Email e senha são obrigatórios.");
       }
 
+      if (isInstitution && (!form.institutionName.trim() || !form.fullName.trim() || !form.phone.trim() || !form.province)) {
+        throw new Error("Preencha o nome da instituição, responsável, telefone e província.");
+      }
+
       const localizedValue = [form.province, form.municipality, form.neighborhood].filter(Boolean).join(" / ");
 
       const { data, error } = await supabase.auth.signUp({
@@ -189,6 +204,7 @@ export default function AuthPage() {
             nome_completo: form.fullName || form.institutionName || "",
             telefone: form.phone || null,
             instituicao_nome: form.institutionName || null,
+            instituicao_tipo: form.institutionType,
             instituicao_nif: form.nif || null,
             localizacao: localizedValue || null,
             provincia: form.province || null,
@@ -203,7 +219,9 @@ export default function AuthPage() {
       if (data.user && !data.session) {
         setMessage({
           type: "success",
-          text: "Conta criada! Verifique o seu email para confirmar a conta.",
+          text: isInstitution
+            ? "Conta criada! Verifique o seu email. A instituição ficará pendente até ser verificada pela equipa."
+            : "Conta criada! Verifique o seu email para confirmar a conta.",
         });
       } else {
         setMessage({ type: "success", text: "Conta criada com sucesso." });
@@ -236,7 +254,7 @@ export default function AuthPage() {
             <ul className="mt-3 space-y-2 text-sm text-rose-50/90">
               <li>• Dados mínimos no primeiro passo</li>
               <li>• Completar perfil depois do login</li>
-              <li>• Cadastro de instituição com nome e NIF</li>
+              <li>• Instituições podem criar conta e aguardar verificação</li>
             </ul>
           </div>
         </div>
@@ -262,19 +280,74 @@ export default function AuthPage() {
           <form onSubmit={handleSubmit} className="space-y-4">
             {activeTab === "register" && (
               <div className="space-y-4 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-medium text-zinc-300">Tipo de conta</span>
-                  <span className="rounded-full bg-rose-500/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-rose-300">
-                    Doador
-                  </span>
+                <div>
+                  <span className="mb-2 block text-sm font-medium text-zinc-300">Tipo de conta</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(["doador", "instituicao"] as const).map((type) => (
+                      <button
+                        key={type}
+                        type="button"
+                        aria-pressed={form.userType === type}
+                        onClick={() => handleChange("userType", type)}
+                        className={`rounded-xl border px-3 py-2.5 text-sm font-medium transition ${
+                          form.userType === type
+                            ? "border-rose-500 bg-rose-500/10 text-rose-200"
+                            : "border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                        }`}
+                      >
+                        {type === "doador" ? "Doador" : "Instituição"}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
+                {isInstitution && (
+                  <>
+                    <label className="block text-sm text-zinc-300">
+                      <span className="mb-2 block">Nome da instituição *</span>
+                      <input
+                        value={form.institutionName}
+                        onChange={(e) => handleChange("institutionName", e.target.value)}
+                        placeholder="Ex: Hospital Central"
+                        required
+                        className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-white placeholder:text-zinc-500 outline-none transition focus:border-rose-500"
+                      />
+                    </label>
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <label className="block text-sm text-zinc-300">
+                        <span className="mb-2 block">Tipo de instituição *</span>
+                        <select
+                          value={form.institutionType}
+                          onChange={(e) => handleChange("institutionType", e.target.value)}
+                          required
+                          className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-white outline-none transition focus:border-rose-500"
+                        >
+                          {institutionTypes.map((type) => (
+                            <option key={type.value} value={type.value}>{type.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block text-sm text-zinc-300">
+                        <span className="mb-2 block">NIF</span>
+                        <input
+                          value={form.nif}
+                          onChange={(e) => handleChange("nif", e.target.value)}
+                          placeholder="Número de identificação fiscal"
+                          className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-white placeholder:text-zinc-500 outline-none transition focus:border-rose-500"
+                        />
+                      </label>
+                    </div>
+                  </>
+                )}
+
                 <label className="block text-sm text-zinc-300">
-                  <span className="mb-2 block">Nome completo</span>
+                  <span className="mb-2 block">{isInstitution ? "Nome do responsável *" : "Nome completo"}</span>
                   <input
                     value={form.fullName}
                     onChange={(e) => handleChange("fullName", e.target.value)}
-                    placeholder="Ex: Ana Mário"
+                    placeholder={isInstitution ? "Nome da pessoa responsável pela conta" : "Ex: Ana Mário"}
+                    required={isInstitution}
                     className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-white placeholder:text-zinc-500 outline-none transition focus:border-rose-500"
                   />
                 </label>
@@ -285,6 +358,7 @@ export default function AuthPage() {
                     value={form.phone}
                     onChange={(e) => handleChange("phone", e.target.value)}
                     placeholder="+244 923 000 000"
+                    required={isInstitution}
                     className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-white placeholder:text-zinc-500 outline-none transition focus:border-rose-500"
                   />
                 </label>
@@ -295,6 +369,7 @@ export default function AuthPage() {
                     <select
                       value={form.province}
                       onChange={(e) => handleChange("province", e.target.value)}
+                      required={isInstitution}
                       className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-white outline-none transition focus:border-rose-500"
                     >
                       <option value="">Selecione a província</option>
@@ -334,6 +409,12 @@ export default function AuthPage() {
                   <div className="rounded-xl border border-rose-500/20 bg-rose-500/5 px-3 py-2 text-xs text-rose-200">
                     Localização: <span className="font-semibold text-white">{locationSummary}</span>
                   </div>
+                )}
+
+                {isInstitution && (
+                  <p className="text-xs text-amber-200">
+                    O cadastro da instituição será enviado para verificação antes de poder usar as funcionalidades da plataforma.
+                  </p>
                 )}
               </div>
             )}

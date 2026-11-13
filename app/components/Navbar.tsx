@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
@@ -96,6 +96,42 @@ export function Navbar() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
 
+  const syncUserProfile = useCallback(async (authUser: {
+    id: string;
+    email?: string;
+    user_metadata?: Record<string, unknown>;
+  } | null) => {
+    if (!authUser) {
+      setUser(null);
+      return;
+    }
+
+    const { data: profile, error } = await supabase
+      .from("perfis")
+      .select("papel, nome_completo")
+      .eq("id", authUser.id)
+      .maybeSingle();
+
+    if (error) console.error("Erro ao carregar perfil da navegação:", error.message);
+
+    const metadataRole = authUser.user_metadata?.papel ?? authUser.user_metadata?.role;
+    const fallbackRole: Role = metadataRole === "instituicao" ? "instituicao" : "doador";
+    const role = profile?.papel === "admin" || profile?.papel === "instituicao" || profile?.papel === "doador"
+      ? profile.papel
+      : fallbackRole;
+    const metadataName =
+      authUser.user_metadata?.nome_completo ||
+      authUser.user_metadata?.full_name ||
+      authUser.user_metadata?.instituicao_nome;
+    const fullName = profile?.nome_completo || metadataName || authUser.email?.split("@")[0] || "Usuário";
+
+    setUser({
+      full_name: String(fullName),
+      email: authUser.email ?? "",
+      role,
+    });
+  }, []);
+
   useEffect(() => {
     const onScroll = () => setIsScrolled(window.scrollY > 10);
     onScroll();
@@ -108,60 +144,21 @@ export function Navbar() {
 
     const syncUser = async () => {
       const { data: { session } } = await supabase.auth.getSession();
-      const profile = session?.user;
-
       if (!isMounted) return;
-
-      if (!profile) {
-        setUser(null);
-        return;
-      }
-
-      const userRole = (profile.user_metadata?.papel ?? profile.user_metadata?.role ?? "doador") as Role;
-      const fullName =
-        profile.user_metadata?.nome_completo ||
-        profile.user_metadata?.full_name ||
-        profile.user_metadata?.instituicao_nome ||
-        profile.email?.split("@")[0] ||
-        "Usuário";
-
-      setUser({
-        full_name: fullName,
-        email: profile.email ?? "",
-        role: userRole,
-      });
+      await syncUserProfile(session?.user ?? null);
     };
 
     syncUser();
 
     const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
-      const currentUser = session?.user;
-
-      if (!currentUser) {
-        setUser(null);
-        return;
-      }
-
-      const userRole = (currentUser.user_metadata?.papel ?? currentUser.user_metadata?.role ?? "doador") as Role;
-      const fullName =
-        currentUser.user_metadata?.nome_completo ||
-        currentUser.user_metadata?.full_name ||
-        currentUser.user_metadata?.instituicao_nome ||
-        currentUser.email?.split("@")[0] ||
-        "Usuário";
-
-      setUser({
-        full_name: fullName,
-        email: currentUser.email ?? "",
-        role: userRole,
-      });
+      void syncUserProfile(session?.user ?? null);
     });
 
     return () => {
       isMounted = false;
       authListener.subscription.unsubscribe();
     };
-  }, []);
+  }, [syncUserProfile]);
 
   useEffect(() => {
     setIsMobileMenuOpen(false);
@@ -219,6 +216,9 @@ export function Navbar() {
 
   const isActive = (href: string) => pathname === href;
   const firstName = user?.full_name?.split(" ")[0] ?? "";
+  const visibleNavLinks = user?.role === "admin"
+    ? [...navLinks, { href: "/admin", label: "Admin" }]
+    : navLinks;
 
   return (
     <>
@@ -242,7 +242,7 @@ export function Navbar() {
             </Link>
 
             <div className="hidden flex-1 items-center justify-center md:flex">
-              {navLinks.map((link) => (
+              {visibleNavLinks.map((link) => (
                 <Link
                   key={link.href}
                   href={link.href}
@@ -404,7 +404,7 @@ export function Navbar() {
             )}
 
             <nav className="flex flex-col gap-0.5" aria-label="Menu principal">
-              {navLinks.map((link) => (
+              {visibleNavLinks.map((link) => (
                 <Link
                   key={link.href}
                   href={link.href}
