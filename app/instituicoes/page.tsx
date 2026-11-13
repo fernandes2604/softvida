@@ -96,12 +96,12 @@ export default function InstituicoesPage() {
     };
   }, [loadSession]);
 
-  const registerAtBloodBank = async (institution: Institution) => {
+  const registerAtInstitution = async (institution: Institution) => {
     if (!userId || role !== "doador") return;
     setBusyInstitution(institution.id);
     setMessage(null);
 
-    const { error: enrollmentError } = await supabase.rpc("inscrever_no_banco_sangue", {
+    const { error: enrollmentError } = await supabase.rpc("inscrever_na_instituicao", {
       p_instituicao_id: institution.id,
     });
 
@@ -148,7 +148,7 @@ export default function InstituicoesPage() {
         <p className="text-sm font-semibold uppercase tracking-[0.2em] text-[var(--brand)]">Instituições verificadas</p>
         <h1 className="mt-2 text-3xl font-bold text-[var(--foreground)] sm:text-4xl">Encontre onde doar</h1>
         <p className="mt-3 max-w-2xl text-sm text-[var(--muted)] sm:text-base">
-          Consulte instituições cadastradas e a sua localização. Doadores também podem enviar uma inscrição aos bancos de sangue.
+          Consulte instituições cadastradas e a sua localização. Doadores podem inscrever-se nas instituições verificadas.
         </p>
       </header>
 
@@ -258,34 +258,36 @@ export default function InstituicoesPage() {
                     </a>
                   )}
 
-                  {institution.tipo === "banco_de_sangue" && (
-                    userId && role === "doador" ? (
-                      enrollment ? (
-                        <p className="rounded-xl bg-[var(--brand-soft)] px-4 py-2.5 text-center text-sm font-semibold text-[var(--brand)]">
-                          {enrollment.estado === "aceite" ? "Inscrição aceite" : "Inscrição enviada"}
-                        </p>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => void registerAtBloodBank(institution)}
-                          disabled={busyInstitution === institution.id}
-                          className="rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-wait disabled:opacity-60"
-                        >
-                          {busyInstitution === institution.id ? "A enviar…" : "Inscrever-me para doar"}
-                        </button>
-                      )
-                    ) : userId ? (
-                      <p className="rounded-xl bg-[var(--card-soft)] px-4 py-2.5 text-center text-sm text-[var(--muted)]">
-                        Inscrição disponível para contas de doador.
+                  {userId && role === "doador" ? (
+                    enrollment ? (
+                      <p className="rounded-xl bg-[var(--brand-soft)] px-4 py-2.5 text-center text-sm font-semibold text-[var(--brand)]">
+                        {enrollment.estado === "aceite"
+                          ? "Inscrição aceite"
+                          : enrollment.estado === "rejeitada"
+                            ? "Inscrição rejeitada"
+                            : "Inscrição enviada"}
                       </p>
                     ) : (
-                      <Link
-                        href="/auth"
-                        className="rounded-xl bg-rose-600 px-4 py-2.5 text-center text-sm font-semibold text-white transition hover:bg-rose-500"
+                      <button
+                        type="button"
+                        onClick={() => void registerAtInstitution(institution)}
+                        disabled={busyInstitution === institution.id}
+                        className="rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-wait disabled:opacity-60"
                       >
-                        Entrar para me inscrever
-                      </Link>
+                        {busyInstitution === institution.id ? "A enviar…" : "Inscrever-me nesta instituição"}
+                      </button>
                     )
+                  ) : userId ? (
+                    <p className="rounded-xl bg-[var(--card-soft)] px-4 py-2.5 text-center text-sm text-[var(--muted)]">
+                      Inscrição disponível para contas de doador.
+                    </p>
+                  ) : (
+                    <Link
+                      href="/auth"
+                      className="rounded-xl bg-rose-600 px-4 py-2.5 text-center text-sm font-semibold text-white transition hover:bg-rose-500"
+                    >
+                      Entrar para me inscrever
+                    </Link>
                   )}
                 </div>
               </article>

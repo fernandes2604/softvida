@@ -2078,7 +2078,7 @@ revoke all on function public.pesquisar_pedidos_instituicoes(text, double precis
 grant execute on function public.pesquisar_pedidos_instituicoes(text, double precision, double precision) to anon, authenticated;
 
 -- ---------------------------------------------------------------------
--- 27. INSTITUIÇÕES PÚBLICAS E INSCRIÇÕES EM BANCOS DE SANGUE
+-- 27. INSTITUIÇÕES PÚBLICAS E INSCRIÇÕES DE DOADORES
 -- ---------------------------------------------------------------------
 create or replace function public.listar_instituicoes_publicas()
 returns table (
@@ -2127,11 +2127,46 @@ create table public.inscricoes_bancos_sangue (
 create index inscricoes_bancos_sangue_instituicao_idx
   on public.inscricoes_bancos_sangue (instituicao_id, estado);
 
+comment on table public.inscricoes_bancos_sangue is
+  'Inscrições de doadores em instituições verificadas; nome legado da tabela mantido por compatibilidade.';
+
 alter table public.inscricoes_bancos_sangue enable row level security;
 grant select on public.inscricoes_bancos_sangue to authenticated;
 
 create policy "inscricoes_bancos_sangue_ver" on public.inscricoes_bancos_sangue for select to authenticated
   using (doador_id = auth.uid() or sou_dono_instituicao(instituicao_id) or eh_admin());
+
+create or replace function public.inscrever_na_instituicao(p_instituicao_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if auth.uid() is null then
+    raise exception 'Inicie sessão para se inscrever';
+  end if;
+  if public.meu_papel() <> 'doador' then
+    raise exception 'A inscrição está disponível apenas para contas de doador';
+  end if;
+  if not exists (
+    select 1 from public.doadores d where d.utilizador_id = auth.uid()
+  ) then
+    raise exception 'Complete o seu perfil de doador antes de se inscrever';
+  end if;
+  if not exists (
+    select 1 from public.instituicoes i
+    where i.id = p_instituicao_id
+      and i.estado = 'verificada'
+  ) then
+    raise exception 'Instituição não encontrada ou ainda não verificada';
+  end if;
+
+  insert into public.inscricoes_bancos_sangue (instituicao_id, doador_id)
+  values (p_instituicao_id, auth.uid())
+  on conflict (instituicao_id, doador_id) do nothing;
+end;
+$$;
 
 create or replace function public.inscrever_no_banco_sangue(p_instituicao_id uuid)
 returns void
@@ -2168,6 +2203,8 @@ $$;
 
 revoke all on function public.listar_instituicoes_publicas() from public, anon, authenticated;
 grant execute on function public.listar_instituicoes_publicas() to anon, authenticated;
+revoke all on function public.inscrever_na_instituicao(uuid) from public, anon, authenticated;
+grant execute on function public.inscrever_na_instituicao(uuid) to authenticated;
 revoke all on function public.inscrever_no_banco_sangue(uuid) from public, anon, authenticated;
 grant execute on function public.inscrever_no_banco_sangue(uuid) to authenticated;
 
