@@ -1946,10 +1946,12 @@ comment on column public.pedidos_doacao.codigo is 'Código de acompanhamento ent
 -- Devolve apenas campos públicos: nunca expõe contacto, código,
 -- descrição, morada exata ou coordenadas do solicitante.
 -- ---------------------------------------------------------------------
+drop function if exists public.listar_pedidos_publicos();
 create or replace function public.listar_pedidos_publicos()
 returns table (
   id uuid,
   categoria text,
+  instituicao_atribuida text,
   tipo_sanguineo text,
   quantidade integer,
   nivel text,
@@ -1965,6 +1967,7 @@ set search_path = ''
 as $$
   select p.id,
          c.nome,
+         i_atribuida.nome,
          p.tipo_sanguineo_necessario::text,
          p.quantidade,
          p.nivel::text,
@@ -1974,11 +1977,13 @@ as $$
          p.criado_em
   from public.pedidos_doacao p
   join public.categorias c on c.id = p.categoria_id
+  left join public.instituicoes i_atribuida on i_atribuida.id = p.instituicao_id
   left join public.provincias prov on prov.id = p.provincia_id
   left join public.municipios mun on mun.id = p.municipio_id
   order by p.criado_em desc;
 $$;
 
+drop function if exists public.pesquisar_pedidos_instituicoes(text);
 create or replace function public.pesquisar_pedidos_instituicoes(p_termo text)
 returns table (
   tipo_resultado text,
@@ -1986,6 +1991,7 @@ returns table (
   titulo text,
   tipo_instituicao text,
   categoria text,
+  instituicao_atribuida text,
   tipo_sanguineo text,
   provincia text,
   municipio text,
@@ -2005,6 +2011,7 @@ as $$
          c.nome,
          null::text,
          c.nome,
+         i_atribuida.nome,
          p.tipo_sanguineo_necessario::text,
          prov.nome,
          mun.nome,
@@ -2012,12 +2019,15 @@ as $$
          p.criado_em
   from public.pedidos_doacao p
   join public.categorias c on c.id = p.categoria_id
+  left join public.instituicoes i_atribuida on i_atribuida.id = p.instituicao_id
   left join public.provincias prov on prov.id = p.provincia_id
   left join public.municipios mun on mun.id = p.municipio_id
   cross join termo t
   where t.valor <> ''
-    and p.tipo_sanguineo_necessario is not null
-    and lower(p.tipo_sanguineo_necessario::text) like '%' || t.valor || '%'
+    and (
+      lower(coalesce(p.tipo_sanguineo_necessario::text, '')) like '%' || t.valor || '%'
+      or lower(coalesce(i_atribuida.nome, '')) like '%' || t.valor || '%'
+    )
 
   union all
 
@@ -2025,6 +2035,7 @@ as $$
          i.id,
          i.nome,
          i.tipo::text,
+         null::text,
          null::text,
          null::text,
          prov.nome,
@@ -2186,7 +2197,6 @@ as $$
   where auth.uid() is not null
     and nullif(trim(coalesce(p_termo, '')), '') is not null
     and d.mostrar_nome_localizacao
-    and d.disponivel
     and d.tipo_sanguineo is not null
     and nullif(trim(pf.nome_completo), '') is not null
     and (d.provincia_id is not null or d.municipio_id is not null)
