@@ -2,76 +2,42 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { loadDonorProfile, saveDonorProfile } from "@/app/actions";
 import { supabase } from "@/lib/supabase";
 
 const bloodTypes = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];
 
-const provinces = [
-  "Bengo","Benguela","Bié","Cabinda","Cuando","Cubango","Cuanza Norte","Cuanza Sul","Cunene","Huambo","Huíla",
-  "Icolo e Bengo","Luanda","Lunda Norte","Lunda Sul","Malanje","Moxico","Moxico Leste","Namibe","Uíge","Zaire",
-];
-
-const municipalitiesByProvince: Record<string, string[]> = {
-  Bengo: ["Ambriz", "Dande", "Nambuangongo", "Pango Aluquém", "Bengo"],
-  Benguela: ["Benguela", "Lobito", "Baía Farta", "Caimbambo", "Chongorói"],
-  Bié: ["Andulo", "Camacupa", "Catabola", "Chitembo", "Cuemba", "N'harea"],
-  Cabinda: ["Belize", "Cabinda", "Cacongo", "Buco-Zau"],
-  Cuando: ["Mavinga", "Menongue", "Nancova", "Cuanhama", "Cuchi"],
-  Cubango: ["Cuito Cuanavale", "Dirico", "Mucusso", "Naroa", "Rivungo"],
-  "Cuanza Norte": ["Ambaca", "Bolongongo", "Cambambe", "Cazengo", "Golungo Alto", "N'dalatando"],
-  "Cuanza Sul": ["Amboim", "Cassongue", "Ebo", "Libolo", "Porto Amboim", "Seles"],
-  Cunene: ["Cahama", "Cuanhama", "Curoca", "Namacunde", "Ombadja"],
-  Huambo: ["Bailundo", "Caála", "Huambo", "Longonjo", "Mungo"],
-  Huíla: ["Cacula", "Humpata", "Lubango", "Matala", "Quilengues", "Chibia"],
-  "Icolo e Bengo": ["Icolo e Bengo", "Quiçama"],
-  Luanda: ["Belas", "Cacuaco", "Cazenga", "Ingombota", "Kilamba Kiaxi", "Maianga", "Rangel", "Samba", "Sambizanga", "Viana"],
-  "Lunda Norte": ["Cambulo", "Chitato", "Cuango", "Dondo", "Lubalo", "Lunda Norte"],
-  "Lunda Sul": ["Cacolo", "Dala", "Muconda", "Saurimo"],
-  Malanje: ["Cacuso", "Calandula", "Kiwaba Nzoji", "Malanje", "Marimba"],
-  Moxico: ["Alto Zambeze", "Bundas", "Léua", "Moxico", "Luacano"],
-  "Moxico Leste": ["Lagoa", "Moxico Leste", "Songo", "Moxico"],
-  Namibe: ["Bibala", "Camucuio", "Moçâmedes", "Tômbwa"],
-  Uíge: ["Bungo", "Damba", "Mucaba", "Negage", "Uíge"],
-  Zaire: ["Mbanza Congo", "N'zeto", "Soyo", "Cuimba"],
-};
-
-const channels = [
-  { value: "in_app", label: "Na app" },
-  { value: "email", label: "Email" },
-  { value: "push", label: "Push" },
-  { value: "sms", label: "SMS" },
+const niveis = [
+  { value: "informativo", label: "Informativo", desc: "Sem pressa. Válido 72 h.", active: "border-sky-500 bg-sky-500/15 text-sky-200" },
+  { value: "atencao", label: "Atenção", desc: "Válido 48 h.", active: "border-emerald-500 bg-emerald-500/15 text-emerald-200" },
+  { value: "urgente", label: "Urgente", desc: "Válido 24 h. Avisa por push.", active: "border-amber-500 bg-amber-500/15 text-amber-200" },
+  { value: "critico", label: "Crítico", desc: "Risco de vida. Válido 12 h. Push e SMS.", active: "border-rose-500 bg-rose-500/20 text-rose-100" },
 ] as const;
 
-const donationTypes = [
-  { value: "sangue", label: "Sangue" },
-  { value: "osso", label: "Osso" },
-  { value: "pele", label: "Pele" },
-  { value: "rim", label: "Rim" },
-  { value: "figado", label: "Fígado" },
-  { value: "medula_ossea", label: "Medula óssea" },
-  { value: "coracao", label: "Coração" },
-  { value: "pulmoes", label: "Pulmões" },
-  { value: "pancreas", label: "Pâncreas" },
-  { value: "cornelas", label: "Córneas" },
-] as const;
-
-type Channel = (typeof channels)[number]["value"];
-type DonationType = (typeof donationTypes)[number]["value"];
+type Nivel = (typeof niveis)[number]["value"];
+type ProvinceRow = { id: number; nome: string };
+type MunicipalityRow = { id: number; provincia_id: number; nome: string };
+type CategoryRow = { id: number; slug: string; nome: string };
+type Institution = { id: string; nome: string; estado: string; endereco: string | null; lat: number | null; lng: number | null; provincia_id: number | null; municipio_id: number | null };
 
 type ProfileForm = {
-  nome_completo: string; telefone: string; data_nascimento: string; identificacao_legal: string;
-  provincia: string; municipio: string; bairro: string; tipo_sanguineo: string;
-  peso_kg: string; altura_cm: string; doencas_cronicas: string; medicacao: string;
+  nome_completo: string; telefone: string; data_nascimento: string; sexo: "" | "masculino" | "feminino";
+  provincia: string; municipio: string; bairro: string; lat: number | null; lng: number | null;
+  distancia_maxima_km: number; nivel_minimo_alerta: Nivel;
+  tipo_sanguineo: string; peso_kg: string; altura_cm: string; doencas_cronicas: string; medicacao: string;
   tatuagem_recente: boolean; viagem_recente: boolean; fumador: boolean; consome_alcool: boolean;
   disponivel: boolean; perfil_publico: boolean; partilhar_dados_saude: boolean; ultima_doacao_em: string;
 };
 
-type NotificationItem = { id: number; titulo: string; texto: string; canal: Channel; tipo_doacao: DonationType };
+type RequestItem = { id: string; titulo: string; nivel: Nivel; categoria: string; tipo_sanguineo: string | null; codigo: string | null };
+
+const initialRequest = { titulo: "", corpo: "", categoria_id: "", tipo_sanguineo: "O+", nivel: "urgente" as Nivel, doadores_necessarios: "1" };
 
 const initialForm: ProfileForm = {
-  nome_completo: "", telefone: "", data_nascimento: "", identificacao_legal: "",
-  provincia: "", municipio: "", bairro: "", tipo_sanguineo: "O+",
-  peso_kg: "", altura_cm: "", doencas_cronicas: "nenhuma", medicacao: "nao",
+  nome_completo: "", telefone: "", data_nascimento: "", sexo: "",
+  provincia: "", municipio: "", bairro: "", lat: null, lng: null,
+  distancia_maxima_km: 10, nivel_minimo_alerta: "atencao",
+  tipo_sanguineo: "O+", peso_kg: "", altura_cm: "", doencas_cronicas: "nenhuma", medicacao: "nao",
   tatuagem_recente: false, viagem_recente: false, fumador: false, consome_alcool: false,
   disponivel: true, perfil_publico: true, partilhar_dados_saude: false, ultima_doacao_em: "",
 };
@@ -134,35 +100,35 @@ function getAge(birth: string) {
   return age;
 }
 
-// Indicação informativa. A triagem final é sempre feita pela instituição de saúde.
+// Espelha a função calcular_aptidao() da base de dados. Quem tem algum motivo NÃO recebe alertas de sangue.
 function getEligibility(f: ProfileForm) {
   const blocking: string[] = [];
   const warnings: string[] = [];
   const age = getAge(f.data_nascimento);
   const peso = Number(f.peso_kg);
 
+  if (f.lat === null || f.lng === null) warnings.push("Guarde a sua localização para receber pedidos perto de si.");
   if (age === null || !peso) {
-    return { status: "incompleto" as const, blocking, warnings: ["Preencha a data de nascimento e o peso para ver a sua aptidão."] };
+    return { status: "incompleto" as const, blocking, warnings: ["Preencha a data de nascimento e o peso para ver a sua aptidão.", ...warnings] };
   }
-  if (age < 18 || age > 65) blocking.push("Idade fora do intervalo habitual (18 a 65 anos).");
-  if (peso < 50) blocking.push("Peso abaixo do mínimo habitual (50 kg).");
+  if (age < 18) blocking.push("É necessário ter pelo menos 18 anos.");
+  if (peso < 50) blocking.push("Peso inferior a 50 kg.");
   if (f.ultima_doacao_em) {
+    const dias = f.sexo === "feminino" ? 120 : 90;
     const next = new Date(f.ultima_doacao_em);
-    next.setDate(next.getDate() + 90);
-    if (next > new Date()) blocking.push(`Aguarde até ${formatDate(next)} para voltar a doar.`);
+    next.setDate(next.getDate() + dias);
+    if (next > new Date()) blocking.push(`Última doação há menos de ${dias} dias. Próxima doação a partir de ${formatDate(next)}.`);
   }
-  if (!f.disponivel) blocking.push("Marcou-se como indisponível.");
-  if (f.tatuagem_recente) warnings.push("Tatuagem recente: normalmente exige um período de espera.");
-  if (f.viagem_recente) warnings.push("Viagem recente: a equipa pode pedir informações adicionais.");
-  if (f.doencas_cronicas !== "nenhuma" || f.medicacao !== "nao") warnings.push("Condição ou medicação declarada: será avaliada na triagem.");
+  if (f.doencas_cronicas !== "nenhuma") blocking.push("Doença crónica declarada (requer avaliação clínica).");
+  if (f.medicacao !== "nao") blocking.push("Medicação em curso (requer avaliação clínica).");
+  if (f.tatuagem_recente) blocking.push("Tatuagem recente (aguardar cerca de 4 meses).");
+  if (f.viagem_recente) blocking.push("Viagem recente (requer avaliação clínica).");
 
-  const status = blocking.length ? ("nao_apto" as const) : warnings.length ? ("atencao" as const) : ("apto" as const);
-  return { status, blocking, warnings };
+  return { status: blocking.length ? ("nao_apto" as const) : ("apto" as const), blocking, warnings };
 }
 
 const statusStyle = {
-  apto: { label: "Apto para doar", box: "border-emerald-500/40 bg-emerald-500/10", text: "text-emerald-300" },
-  atencao: { label: "Apto, com atenção", box: "border-amber-500/40 bg-amber-500/10", text: "text-amber-300" },
+  apto: { label: "Apto para doar sangue", box: "border-emerald-500/40 bg-emerald-500/10", text: "text-emerald-300" },
   nao_apto: { label: "Neste momento, não apto", box: "border-rose-500/40 bg-rose-500/10", text: "text-rose-300" },
   incompleto: { label: "Perfil incompleto", box: "border-zinc-700 bg-zinc-900", text: "text-zinc-300" },
 };
@@ -173,13 +139,18 @@ export default function PerfilPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
-  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [requests, setRequests] = useState<RequestItem[]>([]);
+  const [papel, setPapel] = useState<"doador" | "instituicao" | "admin">("doador");
+  const [provinceRows, setProvinceRows] = useState<ProvinceRow[]>([]);
+  const [municipalityRows, setMunicipalityRows] = useState<MunicipalityRow[]>([]);
+  const [categoryRows, setCategoryRows] = useState<CategoryRow[]>([]);
+  const [institution, setInstitution] = useState<Institution | null>(null);
+  const [locating, setLocating] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const [form, setForm] = useState<ProfileForm>(initialForm);
   const [baseline, setBaseline] = useState<ProfileForm>(initialForm);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
-  const [newNotification, setNewNotification] = useState({
-    titulo: "", texto: "", canal: "in_app" as Channel, tipo_doacao: "sangue" as DonationType,
-  });
+  const [newRequest, setNewRequest] = useState(initialRequest);
 
   useEffect(() => {
     let isMounted = true;
@@ -189,47 +160,65 @@ export default function PerfilPage() {
       const session = sessionData.session;
       if (!isMounted) return;
       if (!session) { setLoading(false); return; }
+      const uid = session.user.id;
+      setUserId(uid);
 
-      const currentUser = session.user;
-      setUserId(currentUser.id);
-      const meta = currentUser.user_metadata ?? {};
+      const [prov, mun, cat, perfilDb] = await Promise.all([
+        supabase.from("provincias").select("id, nome").order("nome"),
+        supabase.from("municipios").select("id, provincia_id, nome").order("nome"),
+        supabase.from("categorias").select("id, slug, nome").order("id"),
+        supabase.from("perfis").select("nome_completo, telefone, papel").eq("id", uid).maybeSingle(),
+      ]);
+      const provs = (prov.data ?? []) as ProvinceRow[];
+      const muns = (mun.data ?? []) as MunicipalityRow[];
+      const cats = (cat.data ?? []) as CategoryRow[];
+      if (!isMounted) return;
+      setProvinceRows(provs); setMunicipalityRows(muns); setCategoryRows(cats);
 
-      // Monta o formulário completo e só depois atualiza o estado (permite detetar alterações por guardar)
-      const next: ProfileForm = {
-        ...initialForm,
-        nome_completo: meta.nome_completo || "",
-        telefone: meta.telefone || "",
-        provincia: meta.provincia || "",
-        municipio: meta.municipio || "",
-        bairro: meta.bairro || "",
-      };
+      const role = (perfilDb.data?.papel ?? "doador") as "doador" | "instituicao" | "admin";
+      setPapel(role);
 
-      const { data: perfilData } = await supabase.from("perfis").select("nome_completo, telefone").eq("id", currentUser.id).maybeSingle();
-      if (perfilData) {
-        next.nome_completo = perfilData.nome_completo || next.nome_completo;
-        next.telefone = perfilData.telefone || next.telefone;
+      if (role === "instituicao") {
+        const { data: inst } = await supabase
+          .from("instituicoes")
+          .select("id, nome, estado, endereco, lat, lng, provincia_id, municipio_id")
+          .eq("dono_id", uid).order("criado_em").limit(1).maybeSingle();
+        if (!isMounted) return;
+        setInstitution((inst as Institution) ?? null);
+        const sangue = cats.find((c) => c.slug === "sangue");
+        if (sangue) setNewRequest((p) => ({ ...p, categoria_id: String(sangue.id) }));
+        setLoading(false);
+        return;
       }
 
-      const { data: d } = await supabase.from("doadores").select("*").eq("utilizador_id", currentUser.id).maybeSingle();
-      if (d) {
-        const day = (v: string | null) => (v ? new Date(v).toISOString().slice(0, 10) : "");
+      const { perfil, doador } = await loadDonorProfile(uid);
+      const next: ProfileForm = { ...initialForm, nome_completo: perfil?.nome_completo ?? "", telefone: perfil?.telefone ?? "" };
+
+      if (doador) {
+        const day = (v: string | null) => (v ? String(v).slice(0, 10) : "");
         Object.assign(next, {
-          tipo_sanguineo: d.tipo_sanguineo || next.tipo_sanguineo,
-          data_nascimento: day(d.data_nascimento),
-          identificacao_legal: d.identificacao_legal || "",
-          peso_kg: d.peso_kg ? String(d.peso_kg) : "",
-          altura_cm: d.altura_cm ? String(d.altura_cm) : "",
-          doencas_cronicas: d.doencas_cronicas || next.doencas_cronicas,
-          medicacao: d.medicacao || next.medicacao,
-          tatuagem_recente: Boolean(d.tatuagem_recente),
-          viagem_recente: Boolean(d.viagem_recente),
-          fumador: Boolean(d.fumador),
-          consome_alcool: Boolean(d.consome_alcool),
-          disponivel: Boolean(d.disponivel),
-          perfil_publico: Boolean(d.perfil_publico),
-          partilhar_dados_saude: Boolean(d.partilhar_dados_saude),
-          ultima_doacao_em: day(d.ultima_doacao_em),
-          bairro: d.bairro || next.bairro,
+          tipo_sanguineo: doador.tipo_sanguineo || next.tipo_sanguineo,
+          sexo: doador.sexo ?? "",
+          data_nascimento: day(doador.data_nascimento),
+          provincia: provs.find((x) => x.id === doador.provincia_id)?.nome ?? "",
+          municipio: muns.find((x) => x.id === doador.municipio_id)?.nome ?? "",
+          bairro: doador.bairro ?? "",
+          lat: doador.lat ?? null,
+          lng: doador.lng ?? null,
+          distancia_maxima_km: Number(doador.distancia_maxima_km ?? 10),
+          nivel_minimo_alerta: doador.nivel_minimo_alerta ?? "atencao",
+          peso_kg: doador.peso_kg ? String(doador.peso_kg) : "",
+          altura_cm: doador.altura_cm ? String(doador.altura_cm) : "",
+          doencas_cronicas: doador.doencas_cronicas || next.doencas_cronicas,
+          medicacao: doador.medicacao || next.medicacao,
+          tatuagem_recente: Boolean(doador.tatuagem_recente),
+          viagem_recente: Boolean(doador.viagem_recente),
+          fumador: Boolean(doador.fumador),
+          consome_alcool: Boolean(doador.consome_alcool),
+          disponivel: Boolean(doador.disponivel),
+          perfil_publico: Boolean(doador.perfil_publico),
+          partilhar_dados_saude: Boolean(doador.partilhar_dados_saude),
+          ultima_doacao_em: day(doador.ultima_doacao_em),
         });
       }
 
@@ -260,10 +249,13 @@ export default function PerfilPage() {
     return () => clearTimeout(t);
   }, [message]);
 
-  const municipalityOptions = useMemo(() => (form.provincia ? municipalitiesByProvince[form.provincia] ?? [] : []), [form.provincia]);
+  const municipalityOptions = useMemo(() => {
+    const provId = provinceRows.find((p) => p.nome === form.provincia)?.id;
+    return provId ? municipalityRows.filter((m) => m.provincia_id === provId).map((m) => m.nome) : [];
+  }, [form.provincia, provinceRows, municipalityRows]);
 
   const completeness = useMemo(() => {
-    const filled = [form.nome_completo, form.telefone, form.data_nascimento, form.identificacao_legal, form.provincia, form.municipio, form.peso_kg, form.altura_cm]
+    const filled = [form.nome_completo, form.telefone, form.data_nascimento, form.sexo, form.provincia, form.lat !== null ? "ok" : "", form.peso_kg, form.altura_cm]
       .filter((v) => v.trim() !== "").length;
     return Math.round((filled / 8) * 100);
   }, [form]);
@@ -278,19 +270,33 @@ export default function PerfilPage() {
     if (!userId) { setMessage({ type: "error", text: "Precisa de iniciar sessão para guardar o perfil." }); return; }
     if (!form.nome_completo.trim()) { setMessage({ type: "error", text: "Indique o seu nome completo antes de guardar." }); return; }
 
+    const telefone = form.telefone.replace(/[\s-]/g, "");
+    if (telefone && !/^\+[1-9][0-9]{7,14}$/.test(telefone)) {
+      setMessage({ type: "error", text: "Use o formato internacional no telefone, por exemplo +244923000000." }); return;
+    }
+    const age = getAge(form.data_nascimento);
+    if (age !== null && age < 18) { setMessage({ type: "error", text: "É necessário ter pelo menos 18 anos para ser doador." }); return; }
+    const peso = form.peso_kg ? Number(form.peso_kg) : null;
+    const altura = form.altura_cm ? Number(form.altura_cm) : null;
+    if (peso !== null && (peso < 40 || peso > 200)) { setMessage({ type: "error", text: "O peso deve estar entre 40 e 200 kg." }); return; }
+    if (altura !== null && (altura < 140 || altura > 220)) { setMessage({ type: "error", text: "A altura deve estar entre 140 e 220 cm." }); return; }
+
     setSaving(true);
     setMessage(null);
 
     try {
-      const perfisPayload = { id: userId, papel: "doador", nome_completo: form.nome_completo, telefone: form.telefone || null };
+      const provId = provinceRows.find((p) => p.nome === form.provincia)?.id ?? null;
+      const munId = municipalityRows.find((m) => m.nome === form.municipio && m.provincia_id === provId)?.id ?? null;
 
-      const doadorPayload = {
-        utilizador_id: userId,
+      const result = await saveDonorProfile({
+        userId,
+        nome_completo: form.nome_completo,
+        telefone: telefone || null,
         tipo_sanguineo: form.tipo_sanguineo,
-        data_nascimento: form.data_nascimento ? new Date(form.data_nascimento).toISOString() : null,
-        identificacao_legal: form.identificacao_legal || null,
-        peso_kg: form.peso_kg ? Number(form.peso_kg) : null,
-        altura_cm: form.altura_cm ? Number(form.altura_cm) : null,
+        data_nascimento: form.data_nascimento || null,
+        identificacao_legal: null,
+        peso_kg: peso,
+        altura_cm: altura,
         doencas_cronicas: form.doencas_cronicas,
         medicacao: form.medicacao,
         tatuagem_recente: form.tatuagem_recente,
@@ -300,33 +306,192 @@ export default function PerfilPage() {
         disponivel: form.disponivel,
         perfil_publico: form.perfil_publico,
         partilhar_dados_saude: form.partilhar_dados_saude,
-        ultima_doacao_em: form.ultima_doacao_em ? new Date(form.ultima_doacao_em).toISOString() : null,
-        bairro: form.bairro || null,
-      };
+        ultima_doacao_em: form.ultima_doacao_em || null,
+        bairro: form.bairro.trim() || null,
+      });
 
-      const { error: perfilError } = await supabase.from("perfis").upsert(perfisPayload, { onConflict: "id" });
-      if (perfilError) throw perfilError;
-      const { error: doadorError } = await supabase.from("doadores").upsert(doadorPayload, { onConflict: "utilizador_id" });
-      if (doadorError) throw doadorError;
+      if (!result.ok) throw new Error("Falha ao guardar o perfil.");
 
-      setBaseline(form);
+      setForm((f) => ({ ...f, telefone }));
+      setBaseline({ ...form, telefone });
       setMessage({ type: "success", text: "Perfil guardado com sucesso." });
     } catch (error) {
-      setMessage({ type: "error", text: error instanceof Error ? error.message : "Não foi possível guardar o perfil." });
+      const text = error instanceof Error ? error.message : (error as { message?: string })?.message ?? "Não foi possível guardar o perfil.";
+      setMessage({ type: "error", text: text.includes("perfis_telefone_uidx") ? "Este telefone já está associado a outra conta." : text });
     } finally {
       setSaving(false);
     }
   };
 
-  const handleAddNotification = () => {
-    if (!newNotification.titulo.trim() || !newNotification.texto.trim()) {
-      setMessage({ type: "error", text: "Preencha o título e a mensagem da notificação." });
-      return;
-    }
-    setNotifications((prev) => [{ id: Date.now(), ...newNotification }, ...prev]);
-    setNewNotification({ titulo: "", texto: "", canal: "in_app", tipo_doacao: "sangue" });
-    setMessage({ type: "success", text: "Notificação criada." });
+  const handleLocate = () => {
+    if (!navigator.geolocation) { setMessage({ type: "error", text: "O seu dispositivo não suporta localização." }); return; }
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setForm((f) => ({ ...f, lat: Number(pos.coords.latitude.toFixed(5)), lng: Number(pos.coords.longitude.toFixed(5)) }));
+        setLocating(false);
+      },
+      () => { setLocating(false); setMessage({ type: "error", text: "Não foi possível obter a localização. Verifique a permissão do navegador." }); },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
   };
+
+  /* ----- Instituição: pedir doação (cria um alerta; os triggers da base de dados avisam os doadores elegíveis) ----- */
+  const selectedCategory = categoryRows.find((c) => String(c.id) === newRequest.categoria_id);
+  const isBlood = selectedCategory?.slug === "sangue";
+  const institutionProblem = !institution
+    ? "Ainda não tem uma instituição registada."
+    : institution.estado !== "verificada"
+    ? "A sua instituição ainda não foi verificada. Só instituições verificadas podem pedir doações."
+    : institution.lat === null || institution.lng === null
+    ? "Defina a localização da instituição para poder pedir doações."
+    : null;
+  const institutionPlace = institution
+    ? [institution.endereco, municipalityRows.find((m) => m.id === institution.municipio_id)?.nome, provinceRows.find((p) => p.id === institution.provincia_id)?.nome].filter(Boolean).join(", ")
+    : "";
+
+  const handleCreateRequest = async () => {
+    const r = newRequest;
+    if (!institution || institutionProblem) return;
+    if (!r.titulo.trim()) { setMessage({ type: "error", text: "Indique o título do pedido." }); return; }
+    const needed = Number(r.doadores_necessarios);
+    if (!Number.isInteger(needed) || needed < 1) { setMessage({ type: "error", text: "Indique quantos doadores são necessários (mínimo 1)." }); return; }
+
+    setPublishing(true);
+    try {
+      const { data, error } = await supabase
+        .from("alertas")
+        .insert({
+          instituicao_id: institution.id,
+          categoria_id: r.categoria_id ? Number(r.categoria_id) : null,
+          tipo_sanguineo_necessario: isBlood ? r.tipo_sanguineo : null,
+          nivel: r.nivel,
+          titulo: r.titulo.trim(),
+          corpo: r.corpo.trim() || null,
+          doadores_necessarios: needed,
+        })
+        .select("id, codigo_curto")
+        .single();
+      if (error) throw error;
+
+      setRequests((prev) => [{ id: data.id, titulo: r.titulo.trim(), nivel: r.nivel, categoria: selectedCategory?.nome ?? "", tipo_sanguineo: isBlood ? r.tipo_sanguineo : null, codigo: data.codigo_curto }, ...prev]);
+      setNewRequest({ ...initialRequest, categoria_id: r.categoria_id });
+      setMessage({ type: "success", text: "Pedido publicado. Os doadores elegíveis perto de si vão ser avisados." });
+    } catch (error) {
+      setMessage({ type: "error", text: (error as { message?: string })?.message ?? "Não foi possível publicar o pedido." });
+    } finally {
+      setPublishing(false);
+    }
+  };
+
+  const toast = message && (
+    <div
+      role="status"
+      className={`fixed right-4 top-4 z-50 max-w-sm rounded-xl border px-4 py-3 text-sm shadow-lg ${
+        message.type === "success" ? "border-emerald-500/40 bg-emerald-950 text-emerald-200" : "border-rose-500/40 bg-rose-950 text-rose-200"
+      }`}
+    >
+      {message.text}
+    </div>
+  );
+
+  const requestSection = (
+    <section className="rounded-3xl border border-zinc-800 bg-zinc-950/80 p-5 shadow-xl shadow-black/20 sm:p-6">
+      <h2 className="text-lg font-semibold text-white">Pedir doação</h2>
+      <p className="mt-1 text-sm text-zinc-400">Os doadores elegíveis perto da instituição são avisados automaticamente.</p>
+
+      {institutionProblem && <p className="mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">{institutionProblem}</p>}
+
+      {institution && (
+        <p className="mt-4 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-300">
+          <span className="font-semibold text-white">Localização do pedido:</span> {institution.nome}{institutionPlace ? `, ${institutionPlace}` : ""}
+        </p>
+      )}
+
+      <div className="mt-5 space-y-4">
+        <Field label="Título *">
+          <input value={newRequest.titulo} onChange={(e) => setNewRequest((p) => ({ ...p, titulo: e.target.value }))} placeholder="Ex: Precisamos de sangue para uma cirurgia" className={inputClass} />
+        </Field>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="O que precisa">
+            <select value={newRequest.categoria_id} onChange={(e) => setNewRequest((p) => ({ ...p, categoria_id: e.target.value }))} className={inputClass}>
+              {categoryRows.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}
+            </select>
+          </Field>
+          {isBlood ? (
+            <Field label="Tipo sanguíneo necessário *">
+              <select value={newRequest.tipo_sanguineo} onChange={(e) => setNewRequest((p) => ({ ...p, tipo_sanguineo: e.target.value }))} className={inputClass}>
+                {bloodTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </Field>
+          ) : (
+            <Field label="Doadores necessários *">
+              <input type="number" min={1} value={newRequest.doadores_necessarios} onChange={(e) => setNewRequest((p) => ({ ...p, doadores_necessarios: e.target.value }))} className={inputClass} />
+            </Field>
+          )}
+        </div>
+
+        {isBlood && (
+          <Field label="Doadores necessários *" hint="O pedido fecha sozinho quando houver aceites suficientes.">
+            <input type="number" min={1} value={newRequest.doadores_necessarios} onChange={(e) => setNewRequest((p) => ({ ...p, doadores_necessarios: e.target.value }))} className={inputClass} />
+          </Field>
+        )}
+
+        <fieldset>
+          <legend className="mb-1.5 text-sm font-medium text-zinc-300">Urgência *</legend>
+          <div className="grid gap-2 sm:grid-cols-2" role="radiogroup">
+            {niveis.map((n) => {
+              const selected = newRequest.nivel === n.value;
+              return (
+                <button
+                  key={n.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  onClick={() => setNewRequest((p) => ({ ...p, nivel: n.value }))}
+                  className={`rounded-xl border px-3 py-2 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/50 ${selected ? n.active : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-zinc-500"}`}
+                >
+                  <span className="block text-sm font-semibold">{n.label}</span>
+                  <span className="block text-xs opacity-80">{n.desc}</span>
+                </button>
+              );
+            })}
+          </div>
+        </fieldset>
+
+        <Field label="Detalhes (opcional)">
+          <textarea rows={3} value={newRequest.corpo} onChange={(e) => setNewRequest((p) => ({ ...p, corpo: e.target.value }))} placeholder="Horário, a quem se dirigir, contacto..." className={inputClass} />
+        </Field>
+
+        <button type="button" onClick={handleCreateRequest} disabled={publishing || Boolean(institutionProblem)} className="w-full rounded-xl bg-rose-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-300">
+          {publishing ? "A publicar..." : "Publicar pedido e alertar"}
+        </button>
+      </div>
+
+      <div className="mt-6 border-t border-zinc-800 pt-5">
+        <h3 className="text-sm font-semibold text-white">Pedidos publicados nesta sessão</h3>
+        <div className="mt-3 space-y-3">
+          {requests.length === 0 ? (
+            <p className="text-sm text-zinc-400">Ainda não publicou nenhum pedido.</p>
+          ) : (
+            requests.map((item) => {
+              const n = niveis.find((x) => x.value === item.nivel) ?? niveis[0];
+              return (
+                <div key={item.id} className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="font-semibold text-white">{item.titulo}</p>
+                    <span className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-semibold ${n.active}`}>{n.label}</span>
+                  </div>
+                  <p className="mt-2 text-xs text-zinc-400">{item.categoria}{item.tipo_sanguineo ? ` · ${item.tipo_sanguineo}` : ""}{item.codigo ? ` · código SMS ${item.codigo}` : ""}</p>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </section>
+  );
 
   if (loading) {
     return (
@@ -355,6 +520,19 @@ export default function PerfilPage() {
     );
   }
 
+  if (papel === "instituicao") {
+    return (
+      <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6">
+        <header className="mb-6">
+          <p className="text-sm font-semibold uppercase tracking-[0.22em] text-rose-300">Instituição</p>
+          <h1 className="mt-2 text-3xl font-bold text-white">{institution?.nome ?? "Painel da instituição"}</h1>
+        </header>
+        {toast}
+        {requestSection}
+      </div>
+    );
+  }
+
   return (
     <div className="mx-auto max-w-6xl px-4 pb-28 pt-10 sm:px-6 lg:px-8">
       {/* Cabeçalho */}
@@ -375,18 +553,7 @@ export default function PerfilPage() {
         </div>
       </header>
 
-      {message && (
-        <div
-          role="status"
-          className={`fixed right-4 top-4 z-50 max-w-sm rounded-xl border px-4 py-3 text-sm shadow-lg ${
-            message.type === "success"
-              ? "border-emerald-500/40 bg-emerald-950 text-emerald-200"
-              : "border-rose-500/40 bg-rose-950 text-rose-200"
-          }`}
-        >
-          {message.text}
-        </div>
-      )}
+      {toast}
 
       <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
         {/* Formulário */}
@@ -401,12 +568,16 @@ export default function PerfilPage() {
             <Field label="Data de nascimento">
               <input type="date" value={form.data_nascimento} onChange={(e) => handleChange("data_nascimento", e.target.value)} className={inputClass} />
             </Field>
-            <Field label="Identificação legal" hint="BI, passaporte ou NIF. Não é mostrada a outros utilizadores." wide>
-              <input value={form.identificacao_legal} onChange={(e) => handleChange("identificacao_legal", e.target.value)} placeholder="BI / Passaporte / NIF" className={inputClass} />
+            <Field label="Sexo" hint="Define o intervalo entre doações (90 dias homens, 120 dias mulheres).">
+              <select value={form.sexo} onChange={(e) => handleChange("sexo", e.target.value as ProfileForm["sexo"])} className={inputClass}>
+                <option value="">Selecione</option>
+                <option value="masculino">Masculino</option>
+                <option value="feminino">Feminino</option>
+              </select>
             </Field>
           </Section>
 
-          <Section title="Localização" hint="Usamos a sua zona para enviar pedidos de doação perto de si.">
+          <Section title="Localização e alertas" hint="Sem localização guardada, não recebe pedidos perto de si.">
             <Field label="Província">
               <select
                 value={form.provincia}
@@ -414,17 +585,36 @@ export default function PerfilPage() {
                 className={inputClass}
               >
                 <option value="">Selecione</option>
-                {provinces.map((p) => <option key={p} value={p}>{p}</option>)}
+                {provinceRows.map((p) => <option key={p.id} value={p.nome}>{p.nome}</option>)}
               </select>
             </Field>
             <Field label="Município">
-              <select value={form.municipio} onChange={(e) => handleChange("municipio", e.target.value)} disabled={!form.provincia} className={inputClass}>
-                <option value="">{form.provincia ? "Selecione" : "Escolha primeiro a província"}</option>
+              <select value={form.municipio} onChange={(e) => handleChange("municipio", e.target.value)} disabled={!form.provincia || municipalityOptions.length === 0} className={inputClass}>
+                <option value="">{!form.provincia ? "Escolha primeiro a província" : municipalityOptions.length ? "Selecione" : "Sem municípios registados"}</option>
                 {municipalityOptions.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
             </Field>
             <Field label="Bairro (opcional)" wide>
               <input value={form.bairro} onChange={(e) => handleChange("bairro", e.target.value)} placeholder="Ex: Bairro Operário" className={inputClass} />
+            </Field>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-900/80 p-3 sm:col-span-2">
+              <div>
+                <p className="text-sm font-medium text-zinc-100">{form.lat !== null ? "Localização guardada" : "Localização não definida"}</p>
+                <p className="mt-0.5 text-xs text-zinc-500">As instituições veem apenas a distância aproximada, não o ponto exato.</p>
+              </div>
+              <button type="button" onClick={handleLocate} disabled={locating} className="rounded-xl border border-rose-500/50 px-4 py-2 text-sm font-semibold text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60">
+                {locating ? "A localizar..." : form.lat !== null ? "Atualizar localização" : "Usar a minha localização"}
+              </button>
+            </div>
+
+            <Field label={`Distância máxima: ${form.distancia_maxima_km} km`} hint="Em alertas urgentes ou críticos podemos avisá-lo além deste raio." wide>
+              <input type="range" min={1} max={100} value={form.distancia_maxima_km} onChange={(e) => handleChange("distancia_maxima_km", Number(e.target.value))} className="w-full accent-rose-500" />
+            </Field>
+            <Field label="Receber alertas a partir do nível" wide>
+              <select value={form.nivel_minimo_alerta} onChange={(e) => handleChange("nivel_minimo_alerta", e.target.value as Nivel)} className={inputClass}>
+                {niveis.map((n) => <option key={n.value} value={n.value}>{n.label}</option>)}
+              </select>
             </Field>
           </Section>
 
@@ -492,55 +682,15 @@ export default function PerfilPage() {
           </section>
 
           <section className="rounded-3xl border border-zinc-800 bg-zinc-950/80 p-5 shadow-xl shadow-black/20 sm:p-6">
-            <h2 className="text-lg font-semibold text-white">Criar lembrete</h2>
-            <div className="mt-4 space-y-4">
-              <Field label="Título">
-                <input value={newNotification.titulo} onChange={(e) => setNewNotification((p) => ({ ...p, titulo: e.target.value }))} placeholder="Ex: Voltar a doar" className={inputClass} />
-              </Field>
-              <Field label="Mensagem">
-                <textarea rows={3} value={newNotification.texto} onChange={(e) => setNewNotification((p) => ({ ...p, texto: e.target.value }))} placeholder="Descreva o aviso que pretende receber." className={inputClass} />
-              </Field>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Canal">
-                  <select value={newNotification.canal} onChange={(e) => setNewNotification((p) => ({ ...p, canal: e.target.value as Channel }))} className={inputClass}>
-                    {channels.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
-                  </select>
-                </Field>
-                <Field label="Tipo de doação">
-                  <select value={newNotification.tipo_doacao} onChange={(e) => setNewNotification((p) => ({ ...p, tipo_doacao: e.target.value as DonationType }))} className={inputClass}>
-                    {donationTypes.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                  </select>
-                </Field>
-              </div>
-              <button type="button" onClick={handleAddNotification} className="w-full rounded-xl bg-rose-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-rose-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-300">
-                Criar lembrete
-              </button>
-            </div>
-
-            <div className="mt-6 border-t border-zinc-800 pt-5">
-              <h3 className="text-sm font-semibold text-white">Os seus lembretes</h3>
-              <p className="mt-1 text-xs text-zinc-500">Ficam guardados apenas nesta sessão.</p>
-              <div className="mt-3 space-y-3">
-                {notifications.length === 0 ? (
-                  <p className="text-sm text-zinc-400">Ainda não criou nenhum lembrete.</p>
-                ) : (
-                  notifications.map((item) => {
-                    const donationLabel = donationTypes.find((t) => t.value === item.tipo_doacao)?.label ?? "Doação";
-                    const channelLabel = channels.find((c) => c.value === item.canal)?.label ?? item.canal;
-                    return (
-                      <div key={item.id} className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <p className="font-semibold text-white">{item.titulo}</p>
-                          <button type="button" onClick={() => setNotifications((p) => p.filter((n) => n.id !== item.id))} aria-label={`Remover lembrete ${item.titulo}`} className="text-zinc-500 transition hover:text-rose-300">✕</button>
-                        </div>
-                        <p className="mt-1 text-sm leading-relaxed text-zinc-300">{item.texto}</p>
-                        <p className="mt-2 text-xs text-zinc-500">{donationLabel} · {channelLabel}</p>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
+            <h2 className="text-lg font-semibold text-white">Alertas de doação</h2>
+            <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+              Os pedidos são emitidos por instituições verificadas. Quando houver um perto de si e compatível com o seu perfil, recebe um alerta na app.
+            </p>
+            <ul className="mt-3 space-y-1.5 text-sm text-zinc-300">
+              <li>{form.lat !== null ? "✓" : "•"} Localização guardada</li>
+              <li>{form.disponivel ? "✓" : "•"} Disponível para doar</li>
+              <li>{eligibility.status === "apto" ? "✓" : "•"} Apto para doar sangue</li>
+            </ul>
           </section>
         </aside>
       </div>
