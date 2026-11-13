@@ -113,7 +113,7 @@ export default function AuthPage() {
       if (!isMounted) return;
 
       if (data.session) {
-        router.replace("/");
+        router.replace("/perfil");
       }
     };
 
@@ -121,7 +121,7 @@ export default function AuthPage() {
 
     const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session) {
-        router.replace("/");
+        router.replace("/perfil");
       }
     });
 
@@ -167,7 +167,7 @@ export default function AuthPage() {
 
         if (error) throw error;
 
-        router.replace("/");
+        router.replace("/perfil");
         return;
       }
 
@@ -225,7 +225,7 @@ export default function AuthPage() {
         });
       } else {
         setMessage({ type: "success", text: "Conta criada com sucesso." });
-        router.replace("/");
+        router.replace("/perfil");
       }
     } catch (error) {
       const messageText = error instanceof Error ? error.message : "Ocorreu um erro.";

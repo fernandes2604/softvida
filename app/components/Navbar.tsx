@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { ThemeToggle } from "./ThemeToggle";
@@ -95,6 +95,7 @@ export function Navbar() {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const userMenuRef = useRef<HTMLDivElement>(null);
 
   const syncUserProfile = useCallback(async (authUser: {
@@ -215,6 +216,15 @@ export function Navbar() {
     }
   };
 
+  const handleSearch = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const query = searchQuery.trim();
+    if (!query) return;
+
+    setIsMobileMenuOpen(false);
+    router.push(`/pesquisa?q=${encodeURIComponent(query)}`);
+  };
+
   const isActive = (href: string) => pathname === href;
   const firstName = user?.full_name?.split(" ")[0] ?? "";
   const visibleNavLinks = user?.role === "admin"
@@ -242,7 +252,7 @@ export function Navbar() {
               </span>
             </Link>
 
-            <div className="hidden flex-1 items-center justify-center md:flex">
+            <div className="hidden flex-1 items-center justify-center lg:flex">
               {visibleNavLinks.map((link) => (
                 <Link
                   key={link.href}
@@ -261,7 +271,27 @@ export function Navbar() {
               ))}
             </div>
 
-            <div className="hidden items-center gap-2 md:flex">
+            <form onSubmit={handleSearch} role="search" className="hidden w-52 shrink-0 lg:block">
+              <label htmlFor="navbar-search" className="sr-only">Pesquisar pedidos por tipo sanguíneo ou instituição</label>
+              <div className="relative">
+                <input
+                  id="navbar-search"
+                  type="search"
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Tipo sanguíneo ou instituição"
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-2 pl-3 pr-9 text-xs text-white outline-none placeholder:text-zinc-400 focus:border-rose-500 focus:ring-1 focus:ring-rose-500"
+                />
+                <button type="submit" aria-label="Pesquisar" className="absolute inset-y-0 right-0 flex items-center px-2.5 text-zinc-400 hover:text-white">
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                    <circle cx="11" cy="11" r="7" />
+                    <path strokeLinecap="round" d="m20 20-4-4" />
+                  </svg>
+                </button>
+              </div>
+            </form>
+
+            <div className="hidden items-center gap-2 lg:flex">
               <ThemeToggle />
               {user ? (
                 <div className="relative" ref={userMenuRef}>
@@ -357,7 +387,7 @@ export function Navbar() {
               )}
             </div>
 
-            <div className="flex items-center gap-2 md:hidden">
+            <div className="flex items-center gap-2 lg:hidden">
               <ThemeToggle />
               <button
                 type="button"
@@ -378,7 +408,7 @@ export function Navbar() {
       </nav>
 
       <div
-        className={`fixed inset-0 z-40 transition-all duration-300 md:hidden ${isMobileMenuOpen ? "visible" : "invisible"}`}
+        className={`fixed inset-0 z-40 transition-all duration-300 lg:hidden ${isMobileMenuOpen ? "visible" : "invisible"}`}
         aria-hidden={!isMobileMenuOpen}
       >
         <div
@@ -395,6 +425,26 @@ export function Navbar() {
           }`}
         >
           <div className="flex flex-col gap-2 p-4">
+            <form onSubmit={handleSearch} role="search" className="mb-2">
+              <label htmlFor="mobile-navbar-search" className="sr-only">Pesquisar pedidos por tipo sanguíneo ou instituição</label>
+              <div className="relative">
+                <input
+                  id="mobile-navbar-search"
+                  type="search"
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Tipo sanguíneo ou instituição"
+                  className="w-full rounded-xl border border-zinc-700 bg-zinc-900 py-3 pl-4 pr-11 text-sm text-white outline-none placeholder:text-zinc-400 focus:border-rose-500 focus:ring-1 focus:ring-rose-500"
+                />
+                <button type="submit" aria-label="Pesquisar" className="absolute inset-y-0 right-0 flex items-center px-3 text-zinc-400 hover:text-white">
+                  <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                    <circle cx="11" cy="11" r="7" />
+                    <path strokeLinecap="round" d="m20 20-4-4" />
+                  </svg>
+                </button>
+              </div>
+            </form>
+
             {user && (
               <div className="mb-1 flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900 p-4">
                 <Avatar name={user.full_name} size="lg" />

@@ -1940,3 +1940,114 @@ alter publication supabase_realtime add table public.pedidos_doacao;
 comment on table public.pedidos_doacao is 'Pedidos de doação feitos por qualquer pessoa; atribuídos à instituição verificada mais próxima, que os atende no terreno.';
 comment on table public.pedidos_tentativas is 'Histórico de instituições a quem cada pedido foi atribuído (aceite, recusado ou expirado).';
 comment on column public.pedidos_doacao.codigo is 'Código de acompanhamento entregue ao solicitante (permite consultar e cancelar sem login).';
+
+-- ---------------------------------------------------------------------
+-- 26. LISTAGEM PÚBLICA E PESQUISA DE PEDIDOS
+-- Devolve apenas campos públicos: nunca expõe contacto, código,
+-- descrição, morada exata ou coordenadas do solicitante.
+-- ---------------------------------------------------------------------
+create or replace function public.listar_pedidos_publicos()
+returns table (
+  id uuid,
+  categoria text,
+  tipo_sanguineo text,
+  quantidade integer,
+  nivel text,
+  estado text,
+  provincia text,
+  municipio text,
+  criado_em timestamptz
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select p.id,
+         c.nome,
+         p.tipo_sanguineo_necessario::text,
+         p.quantidade,
+         p.nivel::text,
+         p.estado::text,
+         prov.nome,
+         mun.nome,
+         p.criado_em
+  from public.pedidos_doacao p
+  join public.categorias c on c.id = p.categoria_id
+  left join public.provincias prov on prov.id = p.provincia_id
+  left join public.municipios mun on mun.id = p.municipio_id
+  order by p.criado_em desc;
+$$;
+
+create or replace function public.pesquisar_pedidos_instituicoes(p_termo text)
+returns table (
+  tipo_resultado text,
+  id uuid,
+  titulo text,
+  tipo_instituicao text,
+  categoria text,
+  tipo_sanguineo text,
+  provincia text,
+  municipio text,
+  estado text,
+  criado_em timestamptz
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  with termo as (
+    select lower(trim(coalesce(p_termo, ''))) as valor
+  )
+  select 'pedido'::text,
+         p.id,
+         c.nome,
+         null::text,
+         c.nome,
+         p.tipo_sanguineo_necessario::text,
+         prov.nome,
+         mun.nome,
+         p.estado::text,
+         p.criado_em
+  from public.pedidos_doacao p
+  join public.categorias c on c.id = p.categoria_id
+  left join public.provincias prov on prov.id = p.provincia_id
+  left join public.municipios mun on mun.id = p.municipio_id
+  cross join termo t
+  where t.valor <> ''
+    and p.tipo_sanguineo_necessario is not null
+    and lower(p.tipo_sanguineo_necessario::text) like '%' || t.valor || '%'
+
+  union all
+
+  select 'instituicao'::text,
+         i.id,
+         i.nome,
+         i.tipo::text,
+         null::text,
+         null::text,
+         prov.nome,
+         mun.nome,
+         i.estado::text,
+         i.criado_em
+  from public.instituicoes i
+  left join public.provincias prov on prov.id = i.provincia_id
+  left join public.municipios mun on mun.id = i.municipio_id
+  cross join termo t
+  where t.valor <> ''
+    and i.estado = 'verificada'
+    and (
+      lower(i.nome) like '%' || t.valor || '%'
+      or lower(i.tipo::text) like '%' || t.valor || '%'
+      or lower(coalesce(prov.nome, '')) like '%' || t.valor || '%'
+      or lower(coalesce(mun.nome, '')) like '%' || t.valor || '%'
+    )
+  order by criado_em desc
+  limit 50;
+$$;
+
+revoke all on function public.listar_pedidos_publicos() from public, anon, authenticated;
+grant execute on function public.listar_pedidos_publicos() to anon, authenticated;
+revoke all on function public.pesquisar_pedidos_instituicoes(text) from public, anon, authenticated;
+grant execute on function public.pesquisar_pedidos_instituicoes(text) to anon, authenticated;
