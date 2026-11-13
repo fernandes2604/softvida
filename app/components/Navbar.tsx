@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { ThemeToggle } from "./ThemeToggle";
 
 const navLinks = [
   { href: "/", label: "Home" },
@@ -261,6 +262,7 @@ export function Navbar() {
             </div>
 
             <div className="hidden items-center gap-2 md:flex">
+              <ThemeToggle />
               {user ? (
                 <div className="relative" ref={userMenuRef}>
                   <button
@@ -355,19 +357,22 @@ export function Navbar() {
               )}
             </div>
 
-            <button
-              type="button"
-              onClick={() => setIsMobileMenuOpen((value) => !value)}
-              aria-expanded={isMobileMenuOpen}
-              aria-label={isMobileMenuOpen ? "Fechar menu" : "Abrir menu"}
-              className="rounded-lg p-2 transition-colors hover:bg-zinc-800 md:hidden"
-            >
-              <div className="flex h-[14px] w-5 flex-col justify-between" aria-hidden="true">
-                <span className={`block h-[2px] w-full rounded-full bg-white transition-all duration-300 ${isMobileMenuOpen ? "translate-y-[6px] rotate-45" : ""}`} />
-                <span className={`block h-[2px] w-full rounded-full bg-white transition-all duration-300 ${isMobileMenuOpen ? "scale-x-0 opacity-0" : ""}`} />
-                <span className={`block h-[2px] w-full rounded-full bg-white transition-all duration-300 ${isMobileMenuOpen ? "-translate-y-[8px] -rotate-45" : ""}`} />
-              </div>
-            </button>
+            <div className="flex items-center gap-2 md:hidden">
+              <ThemeToggle />
+              <button
+                type="button"
+                onClick={() => setIsMobileMenuOpen((value) => !value)}
+                aria-expanded={isMobileMenuOpen}
+                aria-label={isMobileMenuOpen ? "Fechar menu" : "Abrir menu"}
+                className="rounded-lg p-2 transition-colors hover:bg-zinc-800"
+              >
+                <div className="flex h-[14px] w-5 flex-col justify-between" aria-hidden="true">
+                  <span className={`block h-[2px] w-full rounded-full bg-white transition-all duration-300 ${isMobileMenuOpen ? "translate-y-[6px] rotate-45" : ""}`} />
+                  <span className={`block h-[2px] w-full rounded-full bg-white transition-all duration-300 ${isMobileMenuOpen ? "scale-x-0 opacity-0" : ""}`} />
+                  <span className={`block h-[2px] w-full rounded-full bg-white transition-all duration-300 ${isMobileMenuOpen ? "-translate-y-[8px] -rotate-45" : ""}`} />
+                </div>
+              </button>
+            </div>
           </div>
         </div>
       </nav>
