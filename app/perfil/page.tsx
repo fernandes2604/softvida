@@ -40,7 +40,8 @@ type ProfileForm = {
   distancia_maxima_km: number; nivel_minimo_alerta: Nivel;
   tipo_sanguineo: string; peso_kg: string; altura_cm: string; doencas_cronicas: string; medicacao: string;
   tatuagem_recente: boolean; viagem_recente: boolean; fumador: boolean; consome_alcool: boolean;
-  disponivel: boolean; perfil_publico: boolean; partilhar_dados_saude: boolean; ultima_doacao_em: string;
+  disponivel: boolean; perfil_publico: boolean; mostrar_nome_localizacao: boolean;
+  partilhar_dados_saude: boolean; ultima_doacao_em: string;
 };
 
 type RequestItem = { id: string; titulo: string; nivel: Nivel; categoria: string; tipo_sanguineo: string | null; codigo: string | null };
@@ -66,7 +67,8 @@ const initialForm: ProfileForm = {
   distancia_maxima_km: 10, nivel_minimo_alerta: "atencao",
   tipo_sanguineo: "O+", peso_kg: "", altura_cm: "", doencas_cronicas: "nenhuma", medicacao: "nao",
   tatuagem_recente: false, viagem_recente: false, fumador: false, consome_alcool: false,
-  disponivel: true, perfil_publico: true, partilhar_dados_saude: false, ultima_doacao_em: "",
+  disponivel: true, perfil_publico: true, mostrar_nome_localizacao: false,
+  partilhar_dados_saude: false, ultima_doacao_em: "",
 };
 
 const inputClass =
@@ -330,6 +332,7 @@ export default function PerfilPage() {
           consome_alcool: Boolean(doador.consome_alcool),
           disponivel: Boolean(doador.disponivel),
           perfil_publico: Boolean(doador.perfil_publico),
+          mostrar_nome_localizacao: Boolean(doador.mostrar_nome_localizacao),
           partilhar_dados_saude: Boolean(doador.partilhar_dados_saude),
           ultima_doacao_em: day(doador.ultima_doacao_em),
         });
@@ -463,6 +466,11 @@ export default function PerfilPage() {
       });
 
       if (!result.ok) throw new Error("Falha ao guardar o perfil.");
+
+      const { error: visibilityError } = await supabase.rpc("definir_visibilidade_busca_doador", {
+        p_visivel: form.mostrar_nome_localizacao,
+      });
+      if (visibilityError) throw new Error(visibilityError.message);
 
       setForm((f) => ({ ...f, telefone }));
       setBaseline({ ...form, telefone });
@@ -1177,6 +1185,12 @@ export default function PerfilPage() {
             <Section title="Disponibilidade e privacidade">
               <Switch label="Disponível para doar" desc="Se desligar, deixa de receber alertas." checked={form.disponivel} onChange={(v) => handleChange("disponivel", v)} />
               <Switch label="Perfil público" desc="Mostra o seu tipo sanguíneo e telefone na lista pública de doadores." checked={form.perfil_publico} onChange={(v) => handleChange("perfil_publico", v)} />
+              <Switch
+                label="Aparecer nas buscas de doadores"
+                desc="Partilha o seu nome, telefone, tipo sanguíneo e província/município com utilizadores autenticados."
+                checked={form.mostrar_nome_localizacao}
+                onChange={(v) => handleChange("mostrar_nome_localizacao", v)}
+              />
               <div className="sm:col-span-2">
                 <Switch label="Partilhar dados de saúde" desc="Permite que as instituições vejam peso, medicação e histórico." checked={form.partilhar_dados_saude} onChange={(v) => handleChange("partilhar_dados_saude", v)} />
               </div>

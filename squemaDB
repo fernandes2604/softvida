@@ -2043,6 +2043,7 @@ as $$
       or lower(coalesce(prov.nome, '')) like '%' || t.valor || '%'
       or lower(coalesce(mun.nome, '')) like '%' || t.valor || '%'
     )
+
   order by criado_em desc
   limit 50;
 $$;
@@ -2051,3 +2052,176 @@ revoke all on function public.listar_pedidos_publicos() from public, anon, authe
 grant execute on function public.listar_pedidos_publicos() to anon, authenticated;
 revoke all on function public.pesquisar_pedidos_instituicoes(text) from public, anon, authenticated;
 grant execute on function public.pesquisar_pedidos_instituicoes(text) to anon, authenticated;
+
+-- ---------------------------------------------------------------------
+-- 27. INSTITUIÇÕES PÚBLICAS E INSCRIÇÕES EM BANCOS DE SANGUE
+-- ---------------------------------------------------------------------
+create or replace function public.listar_instituicoes_publicas()
+returns table (
+  id uuid,
+  nome text,
+  tipo text,
+  descricao text,
+  endereco text,
+  municipio text,
+  provincia text,
+  lat double precision,
+  lng double precision
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select i.id,
+         i.nome,
+         i.tipo::text,
+         i.descricao,
+         i.endereco,
+         mun.nome,
+         prov.nome,
+         i.lat,
+         i.lng
+  from public.instituicoes i
+  left join public.municipios mun on mun.id = i.municipio_id
+  left join public.provincias prov on prov.id = i.provincia_id
+  where i.estado = 'verificada'
+  order by i.nome;
+$$;
+
+create table public.inscricoes_bancos_sangue (
+  id uuid primary key default gen_random_uuid(),
+  instituicao_id uuid not null references public.instituicoes(id) on delete cascade,
+  doador_id uuid not null references public.doadores(utilizador_id) on delete cascade,
+  estado text not null default 'pendente'
+    check (estado in ('pendente', 'aceite', 'rejeitada', 'retirada')),
+  criado_em timestamptz not null default now(),
+  atualizado_em timestamptz not null default now(),
+  unique (instituicao_id, doador_id)
+);
+
+create index inscricoes_bancos_sangue_instituicao_idx
+  on public.inscricoes_bancos_sangue (instituicao_id, estado);
+
+alter table public.inscricoes_bancos_sangue enable row level security;
+grant select on public.inscricoes_bancos_sangue to authenticated;
+
+create policy "inscricoes_bancos_sangue_ver" on public.inscricoes_bancos_sangue for select to authenticated
+  using (doador_id = auth.uid() or sou_dono_instituicao(instituicao_id) or eh_admin());
+
+create or replace function public.inscrever_no_banco_sangue(p_instituicao_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if auth.uid() is null then
+    raise exception 'Inicie sessão para se inscrever';
+  end if;
+  if public.meu_papel() <> 'doador' then
+    raise exception 'A inscrição está disponível apenas para contas de doador';
+  end if;
+  if not exists (
+    select 1 from public.doadores d where d.utilizador_id = auth.uid()
+  ) then
+    raise exception 'Complete o seu perfil de doador antes de se inscrever';
+  end if;
+  if not exists (
+    select 1 from public.instituicoes i
+    where i.id = p_instituicao_id
+      and i.tipo = 'banco_de_sangue'
+      and i.estado = 'verificada'
+  ) then
+    raise exception 'Banco de sangue não encontrado ou ainda não verificado';
+  end if;
+
+  insert into public.inscricoes_bancos_sangue (instituicao_id, doador_id)
+  values (p_instituicao_id, auth.uid())
+  on conflict (instituicao_id, doador_id) do nothing;
+end;
+$$;
+
+revoke all on function public.listar_instituicoes_publicas() from public, anon, authenticated;
+grant execute on function public.listar_instituicoes_publicas() to anon, authenticated;
+revoke all on function public.inscrever_no_banco_sangue(uuid) from public, anon, authenticated;
+grant execute on function public.inscrever_no_banco_sangue(uuid) to authenticated;
+
+-- ---------------------------------------------------------------------
+-- 28. CONSENTIMENTO PARA APARECER NAS BUSCAS DE DOADORES
+-- Nome e localização só são devolvidos a utilizadores autenticados e
+-- quando o próprio doador ativa esta opção no perfil.
+-- ---------------------------------------------------------------------
+alter table public.doadores
+  add column if not exists mostrar_nome_localizacao boolean not null default false;
+
+comment on column public.doadores.mostrar_nome_localizacao is
+  'Consentimento para exibir nome, telefone, tipo sanguíneo e província/município na busca autenticada de doadores.';
+
+drop function if exists public.pesquisar_doadores(text);
+create or replace function public.pesquisar_doadores(p_termo text)
+returns table (
+  id uuid,
+  nome text,
+  telefone text,
+  tipo_sanguineo text,
+  provincia text,
+  municipio text
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select d.utilizador_id,
+         pf.nome_completo,
+         case when d.mostrar_nome_localizacao then pf.telefone end,
+         d.tipo_sanguineo::text,
+         prov.nome,
+         mun.nome
+  from public.doadores d
+  join public.perfis pf on pf.id = d.utilizador_id
+  left join public.provincias prov on prov.id = d.provincia_id
+  left join public.municipios mun on mun.id = d.municipio_id
+  where auth.uid() is not null
+    and nullif(trim(coalesce(p_termo, '')), '') is not null
+    and d.mostrar_nome_localizacao
+    and d.disponivel
+    and d.tipo_sanguineo is not null
+    and nullif(trim(pf.nome_completo), '') is not null
+    and (d.provincia_id is not null or d.municipio_id is not null)
+    and (
+      lower(pf.nome_completo) like '%' || lower(trim(p_termo)) || '%'
+      or lower(d.tipo_sanguineo::text) like '%' || lower(trim(p_termo)) || '%'
+      or lower(coalesce(prov.nome, '')) like '%' || lower(trim(p_termo)) || '%'
+      or lower(coalesce(mun.nome, '')) like '%' || lower(trim(p_termo)) || '%'
+    )
+  order by pf.nome_completo
+  limit 50;
+$$;
+
+create or replace function public.definir_visibilidade_busca_doador(p_visivel boolean)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if auth.uid() is null or public.meu_papel() <> 'doador' then
+    raise exception 'Apenas doadores autenticados podem alterar esta opção';
+  end if;
+
+  update public.doadores
+     set mostrar_nome_localizacao = coalesce(p_visivel, false)
+   where utilizador_id = auth.uid();
+
+  if not found then
+    raise exception 'Perfil de doador não encontrado';
+  end if;
+end;
+$$;
+
+revoke all on function public.definir_visibilidade_busca_doador(boolean) from public, anon, authenticated;
+grant execute on function public.definir_visibilidade_busca_doador(boolean) to authenticated;
+revoke all on function public.pesquisar_doadores(text) from public, anon, authenticated;
+grant execute on function public.pesquisar_doadores(text) to anon, authenticated;

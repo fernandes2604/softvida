@@ -272,14 +272,14 @@ export function Navbar() {
             </div>
 
             <form onSubmit={handleSearch} role="search" className="hidden w-52 shrink-0 lg:block">
-              <label htmlFor="navbar-search" className="sr-only">Pesquisar pedidos por tipo sanguíneo ou instituição</label>
+              <label htmlFor="navbar-search" className="sr-only">Pesquisar doadores por nome, tipo sanguíneo ou localização</label>
               <div className="relative">
                 <input
                   id="navbar-search"
                   type="search"
                   value={searchQuery}
                   onChange={(event) => setSearchQuery(event.target.value)}
-                  placeholder="Tipo sanguíneo ou instituição"
+                  placeholder="Doador, sangue ou localização"
                   className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-2 pl-3 pr-9 text-xs text-white outline-none placeholder:text-zinc-400 focus:border-rose-500 focus:ring-1 focus:ring-rose-500"
                 />
                 <button type="submit" aria-label="Pesquisar" className="absolute inset-y-0 right-0 flex items-center px-2.5 text-zinc-400 hover:text-white">
@@ -426,14 +426,14 @@ export function Navbar() {
         >
           <div className="flex flex-col gap-2 p-4">
             <form onSubmit={handleSearch} role="search" className="mb-2">
-              <label htmlFor="mobile-navbar-search" className="sr-only">Pesquisar pedidos por tipo sanguíneo ou instituição</label>
+              <label htmlFor="mobile-navbar-search" className="sr-only">Pesquisar doadores por nome, tipo sanguíneo ou localização</label>
               <div className="relative">
                 <input
                   id="mobile-navbar-search"
                   type="search"
                   value={searchQuery}
                   onChange={(event) => setSearchQuery(event.target.value)}
-                  placeholder="Tipo sanguíneo ou instituição"
+                  placeholder="Doador, sangue ou localização"
                   className="w-full rounded-xl border border-zinc-700 bg-zinc-900 py-3 pl-4 pr-11 text-sm text-white outline-none placeholder:text-zinc-400 focus:border-rose-500 focus:ring-1 focus:ring-rose-500"
                 />
                 <button type="submit" aria-label="Pesquisar" className="absolute inset-y-0 right-0 flex items-center px-3 text-zinc-400 hover:text-white">
