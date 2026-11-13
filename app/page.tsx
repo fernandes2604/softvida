@@ -41,7 +41,6 @@ const testimonials = [
 const creators = [
   { name: "Evandro Fernandes", role: "Desenvolvedor de projeto e Front-end", initials: "EF", bio: "Cria experiências digitais claras, acessíveis e funcionais." },
   { name: "Abelardo Guarda-Sol", role: "Desenvolvedor Back-end", initials: "AG", bio: "Constrói soluções robustas e seguras para a plataforma." },
-  { name: "Glaucio Kamati", role: "Designer UI/UX", initials: "GK", bio: "Desenha interfaces intuitivas e com foco na experiência do utilizador." },
 ];
 
 
